@@ -95,8 +95,17 @@ public class MainActivity extends Activity {
         String[] paths = {"/system/bin/su", "/system/xbin/su", "/data/adb/magisk/magisk"};
         for (String p : paths) {
             if (new File(p).exists()) {
-                String uid = runRoot("id -u").trim();
-                if (uid.equals("0")) { isRooted = true; return; }
+                try {
+                    Process p2 = Runtime.getRuntime().exec(new String[]{p, "-c", "id -u"});
+                    BufferedReader br = new BufferedReader(new InputStreamReader(p2.getInputStream()));
+                    String uid = br.readLine();
+                    br.close();
+                    p2.waitFor();
+                    if ("0".equals(uid)) {
+                        isRooted = true;
+                        return;
+                    }
+                } catch (Exception ignored) {}
             }
         }
     }
