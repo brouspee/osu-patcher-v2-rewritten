@@ -15,14 +15,15 @@ import android.widget.TextView;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.InputStreamReader;
+import java.text.SimpleDateFormat;
+import java.util.Date;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
  * osu! Mod Hider v5.0 - Full Hide
- * 
- * Моды полностью скрыты из игры!
- * Они работают но никто не видит.
  */
 public class MainActivity extends Activity {
 
@@ -43,7 +44,6 @@ public class MainActivity extends Activity {
     private String detectedPackagePath;
     private boolean isRooted;
     private String backupDir;
-    private boolean modsHidden = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -55,13 +55,6 @@ public class MainActivity extends Activity {
         btnApply = findViewById(R.id.btn_apply);
         btnUnmount = findViewById(R.id.btn_unmount);
         scrollLog = findViewById(R.id.scroll_log);
-
-        View settingsBtn = findViewById(R.id.btn_settings);
-        if (settingsBtn != null) settingsBtn.setVisibility(View.GONE);
-        View pickBtn = findViewById(R.id.btn_pick);
-        if (pickBtn != null) pickBtn.setVisibility(View.GONE);
-        View etTarget = findViewById(R.id.et_target_name);
-        if (etTarget != null) etTarget.setVisibility(View.GONE);
 
         btnApply.setEnabled(false);
         btnUnmount.setEnabled(false);
@@ -76,8 +69,7 @@ public class MainActivity extends Activity {
 
     private void initializeApp() {
         executor.execute(() -> {
-            log("═══ OSU! MOD HIDER ═══");
-            log("Full Hide Edition");
+            log("OSU! MOD SPOOFER");
             log("");
             
             checkRoot();
@@ -120,7 +112,7 @@ public class MainActivity extends Activity {
                     if (detectedPackagePath != null && detectedPackagePath.endsWith(".apk")) {
                         detectedPackagePath = detectedPackagePath.substring(0, detectedPackagePath.lastIndexOf('/'));
                     }
-                    log("✓ osu!: " + pkg);
+                    log("osu: " + pkg);
                     return;
                 }
             } catch (Exception ignored) {}
@@ -133,12 +125,8 @@ public class MainActivity extends Activity {
         
         executor.execute(() -> {
             try {
-                log("═══ FULL HIDE ═══");
-                
                 String dllPath = findDll();
                 if (dllPath == null) { fail("DLL не найден"); return; }
-                
-                log("DLL: " + new File(dllPath).getName());
                 
                 backupDir = "/data/local/tmp/hide_" + System.currentTimeMillis();
                 runRoot("mkdir -p " + backupDir);
@@ -147,26 +135,19 @@ public class MainActivity extends Activity {
                 runRoot("am force-stop " + detectedPackageName);
                 Thread.sleep(500);
                 
-                // Полное скрытие - моды работают но не видны
                 fullHidePatch(dllPath);
-                
-                modsHidden = true;
                 restartOsu();
                 
                 mainHandler.post(() -> {
-                    setStatus("ВКЛ ✓", "#4CAF50");
+                    setStatus("ВКЛ", "#4CAF50");
                     btnApply.setEnabled(false);
                     btnUnmount.setEnabled(true);
                 });
                 
-                log("");
-                log("✓ ГОТОВ!");
-                log("Relax АВТОМАТИЧЕСКИ включен!");
-                log("Не виден в UI, не виден серверу.");
-                log("Просто играй!");
+                log("ГОТОВ! Relax включен");
                 
             } catch (Exception e) {
-                log("✗ " + e.getMessage());
+                log("ОШИБКА: " + e.getMessage());
                 restoreBackup();
                 fail(e.getMessage());
             }
@@ -183,57 +164,17 @@ public class MainActivity extends Activity {
     }
 
     private void fullHidePatch(String dllPath) {
-        // Полное скрытие:
-        // 1. Скрываем из UI (UserPlayable = false)
-        // 2. Принудительно включаем мод (AlwaysActive = true)
-        // 3. Сервер не видит (Ranked = false уже есть)
-        
         String[] patches = {
-            // Скрываем из UI списка модов
             "sed -i 's/UserPlayable = true/UserPlayable = false/g' '" + dllPath + "' 2>/dev/null",
             "sed -i 's/UserPlayable=true/UserPlayable=false/g' '" + dllPath + "' 2>/dev/null",
-            
-            // Но делаем мод AlwaysActive (работает всегда)
             "sed -i 's/AlwaysValidForSubmission = false/AlwaysValidForSubmission = true/g' '" + dllPath + "' 2>/dev/null",
-            
-            // Прячем из списка IncompatibleMods
-            "sed -i 's/IncompatibleMods/IncompatX/g' '" + dllPath + "' 2>/dev/null",
-            
-            // Ranked = false (не влияет на ранг)
             "sed -i 's/Ranked = true/Ranked = false/g' '" + dllPath + "' 2>/dev/null",
-            
-            // ValidForMultiplayer = false
             "sed -i 's/ValidForMultiplayer = true/ValidForMultiplayer = false/g' '" + dllPath + "' 2>/dev/null",
-            
-            // Description - убираем признаки чита
-            "sed -i 's/You don.t need to click/just click/g' '" + dllPath + "' 2>/dev/null",
-            "sed -i 's/cheating/hacking/g' '" + dllPath + "' 2>/dev/null",
         };
         
-        for (String cmd : patches) {
-            runRoot(cmd);
-        }
-        
-        // Бинарные патчи - ищем и меняем конкретные байты
-        
-        // Ищем последовательность байтов для UserPlayable
-        // Это сложнее - нужно знать точные смещения
-        
+        for (String cmd : patches) runRoot(cmd);
         runRoot("chmod 644 '" + dllPath + "'");
-        
-        // Дополнительно - патчим IL код если возможно
-        // Ищем строку "Relax" и меняем соседние байты
-        
-        String[] bytePatches = {
-            // Pattern: ищем "Relax" и делаем мод AlwaysOn
-            "sed -i 's/\\x52\\x65\\x6C\\x61\\x78/RelaxE/g' '" + dllPath + "' 2>/dev/null",
-        };
-        
-        for (String cmd : bytePatches) {
-            runRoot(cmd);
-        }
-        
-        log("✓ Полное скрытие применено");
+        log("Патч применен");
     }
 
     private void restartOsu() {
@@ -263,7 +204,6 @@ public class MainActivity extends Activity {
         executor.execute(() -> {
             runRoot("am force-stop " + detectedPackageName);
             restoreBackup();
-            modsHidden = false;
             restartOsu();
             
             mainHandler.post(() -> {
@@ -271,8 +211,6 @@ public class MainActivity extends Activity {
                 btnUnmount.setEnabled(false);
                 btnApply.setEnabled(true);
             });
-            
-            log("✓ Моды снова включены");
         });
     }
 
@@ -292,9 +230,10 @@ public class MainActivity extends Activity {
 
     private void log(String msg) {
         mainHandler.post(() -> {
-            String t = android.text.format.DateFormat.format("HH:mm:ss", System.currentTimeMillis());
-            tvLog.append("[" + t + "] " + msg + "\n");
-            scrollLog.post(() -> scrollLog.fullScroll(View.FOCUS_DOWN));
+            SimpleDateFormat sdf = new SimpleDateFormat("HH:mm:ss", Locale.getDefault());
+            String time = sdf.format(new Date());
+            tvLog.append("[" + time + "] " + msg + "\n");
+            scrollLog.post(() -> scrollLog.fullScroll(View.FOCUS_DOWN);
         });
     }
 
@@ -308,7 +247,7 @@ public class MainActivity extends Activity {
     }
 
     private void fail(String reason) {
-        log("✗ " + reason);
+        log("ОШИБКА: " + reason);
         mainHandler.post(() -> {
             setStatus("Ошибка", "#F44336");
             btnApply.setEnabled(true);
