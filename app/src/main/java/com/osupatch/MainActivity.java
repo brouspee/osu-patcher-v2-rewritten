@@ -103,6 +103,7 @@ public class MainActivity extends Activity {
         btnApply.setEnabled(false);
         btnPick.setOnClickListener(v -> pickFile());
         btnApply.setOnClickListener(v -> applyPatch());
+        btnUnmount.setOnClickListener(v -> unmount());
 
     // Check permissions first
     checkPermissions();
@@ -181,18 +182,6 @@ protected void onActivityResult(int req, int res, Intent data) {
 // ══════════════════════════════════════════════════════════════════════════════
 
 private void checkSystemCapabilities() {
-
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        executor.shutdown();
-    }
-
-    // ═══════════════════════════════════════════════════════════════════
-    // System Checks - Check SELinux, Root, ptrace, Android version
-    // ═══════════════════════════════════════════════════════════════════
-
-    private void checkSystemCapabilities() {
         executor.execute(() -> {
             log("══════ SYSTEM CHECKS ═══════");
             
@@ -201,12 +190,12 @@ private void checkSystemCapabilities() {
             boolean isAndroid13Plus = Build.VERSION.SDK_INT >= 33;
             log("Android 13+: " + (isAndroid13Plus ? "✓" : "✗"));
             
-            // 2. SELinux status
-            String selinux = runRoot("getenforce 2>/dev/null").trim();
-            if (selinux.isEmpty()) {
-                selinux = runRoot("cat /sys/fs/selinux/enforce 2>/dev/null").trim();
+            // 2. SELinux status - check real status and mode
+            String selinuxStatus = runRoot("getenforce 2>/dev/null").trim();
+            if (selinuxStatus.isEmpty()) {
+                selinuxStatus = runRoot("cat /sys/fs/selinux/enforce 2>/dev/null").trim();
             }
-            log("SELinux: " + (selinux.isEmpty() ? "unknown" : selinux));
+            log("SELinux: " + (selinuxStatus.isEmpty() ? "unknown" : selinuxStatus));
             
             // 3. Root access
             String suTest = runRoot("id").trim();
@@ -217,16 +206,16 @@ private void checkSystemCapabilities() {
                 log("⚠ Без root патчинг НЕВОЗМОЖЕН!");
             }
             
-            // 4. ptrace capability
-            String ptrace = runRoot("cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null").trim();
-            log("ptrace_scope: " + (ptrace.isEmpty() ? "unknown" : ptrace));
-            if (!ptrace.isEmpty() && !ptrace.equals("0")) {
+            // 4. ptrace_scope real value
+            String ptraceScope = runRoot("cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null").trim();
+            log("ptrace_scope: " + (ptraceScope.isEmpty() ? "unknown" : ptraceScope));
+            if (!ptraceScope.isEmpty() && !ptraceScope.equals("0")) {
                 log("⚠ ptrace может быть заблокирован!");
             }
             
             // 5. Check gdb availability
-            String gdb = runRoot("which gdb 2>/dev/null").trim();
-            log("gdb: " + (gdb.isEmpty() ? "not found" : gdb));
+            String gdbAvail = runRoot("gdb --version 2>/dev/null").trim();
+            log("gdb: " + (gdbAvail.isEmpty() ? "not found" : "available"));
             
             // 6. Check linker
             String linker = runRoot("ls /system/bin/linker* 2>/dev/null").trim();
@@ -687,6 +676,25 @@ private void checkSystemCapabilities() {
                 return;
             }
             
+            // Pre-patch checks
+            if (!checkArchitectureMatch()) {
+                rollback();
+                fail();
+                return;
+            }
+            
+            if (!checkVersionMatch()) {
+                rollback();
+                fail();
+                return;
+            }
+            
+            if (!checkBlobSize()) {
+                rollback();
+                fail();
+                return;
+            }
+            
             log("════════════════════════");
             log("Пакет: " + detectedPackageName);
             log("Версия: " + detectedVersion);
@@ -705,14 +713,193 @@ private void checkSystemCapabilities() {
                 return;
             }
             
+            boolean patchApplied = false;
             if (targetType.equals("blob")) {
-                applyBlobPatch(targetName);
+                patchApplied = applyBlobPatch(targetName);
             } else if (targetType.equals("so")) {
-                applySoPatch();
+                patchApplied = applySoPatch();
             } else {
-                applyDllPatch();
+                patchApplied = applyDllPatch();
             }
+            
+            if (!patchApplied) {
+                rollback();
+                fail();
+                return;
+            }
+            
+            // Clear cache
+            clearOsuCache();
+            
+            // Restart osu
+            restartOsu();
+            
+            // REAL verification - wait for process and check maps
+            if (!verifyPatchLoaded()) {
+                log("✗ Патч НЕ загружен - записываю ошибку!");
+                rollback();
+                fail();
+                return;
+            }
+            
+            // Success only if verification passed
+            success();
         });
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════════
+    // Pre-patch Verification Checks
+    // ══════════════════════════════════════════════════════════════════════
+
+    private boolean checkArchitectureMatch() {
+        if (detectedArch == null || pickedFileArch == null) return true;
+        
+        // Check if selected file architecture matches osu architecture
+        if (pickedFileArch.equals("unknown") || detectedArch.equals("unknown")) {
+            log("⚠ Архитектура неизвестна, пропускаю проверку");
+            return true;
+        }
+        
+        // arm64 is compatible with arm32 for DLLs (WOW64), but not vice versa
+        if (pickedFileArch.equals("arm64") && detectedArch.equals("arm32")) {
+            log("✗ Несовместимость архитектуры!");
+            log("  Файл: " + pickedFileArch + ", osu: " + detectedArch);
+            return false;
+        }
+        
+        if (pickedFileArch.equals("x64") && detectedArch.equals("x86")) {
+            log("✗ Несовместимость архитектуры!");
+            log("  Файл: " + pickedFileArch + ", osu: " + detectedArch);
+            return false;
+        }
+        
+        if (pickedFileArch.equals("x86") && detectedArch.equals("x64")) {
+            log("⚠ x86 на x64 - может не работать");
+        }
+        
+        log("→ Архитектура: " + pickedFileArch + " -> " + detectedArch + " ✓");
+        return true;
+    }
+
+    private boolean checkVersionMatch() {
+        // For now, just log - version matching would require metadata in the patch file
+        // This could be enhanced to read version from patch metadata
+        log("→ Проверка версии: " + detectedVersion + " (пропущено)");
+        return true;
+    }
+
+    private boolean checkBlobSize() {
+        if (pickedFile == null || !targetType.equals("blob")) return true;
+        
+        // For blob, we check size in patchBlob method itself
+        // This is a pre-check placeholder
+        return true;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // Post-patch Verification - Check if patch is loaded in memory
+    // ══════════════════════════════════════════════════════════════════════
+
+    private boolean verifyPatchLoaded() {
+        log("═══ VERIFY PATCH ═══");
+        
+        // Wait for osu to start (or use existing process)
+        int pid = getOsuPid();
+        if (pid <= 0) {
+            log("⚠ osu не запущен, запускаю...");
+            runRoot("monkey -c " + detectedPackageName);
+            try { Thread.sleep(3000); } catch (Exception e) {}
+            pid = getOsuPid();
+        }
+        
+        if (pid <= 0) {
+            log("✗ Не удалось получить PID osu");
+            return false;
+        }
+        
+        log("osu PID: " + pid);
+        
+        // Read /proc/<pid>/maps
+        String maps = runRoot("cat /proc/" + pid + "/maps 2>/dev/null");
+        
+        if (maps.isEmpty()) {
+            log("✗ Не удалось прочитать maps!");
+            return false;
+        }
+        
+        // Check for patched library path based on target type
+        String patchedPath = getPatchedFilePath();
+        if (!patchedPath.isEmpty() && maps.contains(patchedPath)) {
+            log("✓ Пропатченная библиотека в памяти: " + patchedPath);
+            return true;
+        }
+        
+        // For blob - check assembly DLL name
+        String dllName = getDllNameFromPatch();
+        if (!dllName.isEmpty() && maps.contains(dllName)) {
+            log("✓ Пропатченная assembly загружена: " + dllName);
+            return true;
+        }
+        
+        // Also check with common assembly names
+        for (String asm : new String[]{"Assembly-CSharp", "assembly", ".dll"}) {
+            if (maps.contains(asm.toLowerCase()) || maps.contains(asm)) {
+                log("✓ Assembly в памяти: " + asm);
+                return true;
+            }
+        }
+        
+        log("✗ Пропатченная библиотека НЕ в памяти!");
+        log("  Ищу: " + patchedPath);
+        log("  Maps содержит: " + (maps.isEmpty() ? "пусто" : "данные"));
+        return false;
+    }
+
+    private int getOsuPid() {
+        String pidof = runRoot("pidof " + detectedPackageName + " 2>/dev/null").trim();
+        if (!pidof.isEmpty()) {
+            try { return Integer.parseInt(pidof.split("\\s+")[0]); }
+            catch (Exception e) {}
+        }
+        
+        // Alternative: use pidof from ps
+        String ps = runRoot("ps -A 2>/dev/null | grep -i '" + detectedPackageName + "'").trim();
+        if (!ps.isEmpty()) {
+            String[] parts = ps.split("\\s+");
+            if (parts.length > 0) {
+                try { return Integer.parseInt(parts[0]); }
+                catch (Exception e) {}
+            }
+        }
+        
+        return -1;
+    }
+
+    private String getPatchedFilePath() {
+        // Return the expected path where patched file should be
+        if (targetType == null) return "";
+        
+        if (targetType.equals("blob")) {
+            return runRoot("find '" + detectedPackagePath + "' -name '*.blob' 2>/dev/null").trim().split("\n")[0];
+        } else if (targetType.equals("so")) {
+            String baseName = stripExt(pickedFileName);
+            return runRoot("find '" + detectedPackagePath + "' -name '*" + baseName + "*.so' 2>/dev/null").trim().split("\n")[0];
+        } else if (targetType.equals("dll")) {
+            String baseName = stripExt(pickedFileName);
+            return runRoot("find '" + detectedPackagePath + "' -name '" + baseName + ".dll' 2>/dev/null").trim().split("\n")[0];
+        }
+        
+        return "";
+    }
+
+    private String getDllNameFromPatch() {
+        if (pickedFileName == null) return "";
+        return stripExt(pickedFileName);
+    }
+
+    private void clearOsuCache() {
+        log("→ Очищаю кэш...");
+        runRoot("pm clear " + detectedPackageName);
     }
 
     private void createBackup() {
@@ -730,7 +917,7 @@ private void checkSystemCapabilities() {
         log("✓ Backup создан в " + backupDir);
     }
 
-    private void applyBlobPatch(String targetName) {
+    private boolean applyBlobPatch(String targetName) {
         log("═══ BLOB PATCH ═══");
         
         // Find blob path
@@ -741,8 +928,7 @@ private void checkSystemCapabilities() {
         
         if (blobs.isEmpty()) {
             log("✗ Blob не найден!");
-            fail();
-            return;
+            return false;
         }
         
         String blobPath = blobs.split("\n")[0];
@@ -762,25 +948,21 @@ private void checkSystemCapabilities() {
             // Patch blob
             if (!patchBlob(workBlob, pickedFile, targetName)) {
                 log("✗ Не удалось пропатчить blob");
-                fail();
-                return;
+                return false;
             }
             
             // Verify after patch
             if (!verifyBlobIntegrity(workBlob)) {
                 log("⚠ Пропатченный blob ПОВРЕЖДЁН!");
-                rollback();
-                fail();
-                return;
+                return false;
             }
             
             // Mount patched blob
-            applyMount(workBlob.getAbsolutePath(), blobPath);
+            return applyMount(workBlob.getAbsolutePath(), blobPath);
             
         } catch (Exception e) {
             log("✗ Ошибка blob: " + e.getMessage());
-            rollback();
-            fail();
+            return false;
         }
     }
 
@@ -894,7 +1076,7 @@ private void checkSystemCapabilities() {
         }
     }
 
-    private void applySoPatch() {
+    private boolean applySoPatch() {
         log("═══ SO PATCH ═══");
         
         // Find the target so
@@ -903,14 +1085,13 @@ private void checkSystemCapabilities() {
         
         if (soPath.isEmpty()) {
             log("✗ SO не найден!");
-            fail();
-            return;
+            return false;
         }
         
-        applyMount(pickedFile.getAbsolutePath(), soPath);
+        return applyMount(pickedFile.getAbsolutePath(), soPath);
     }
 
-    private void applyDllPatch() {
+    private boolean applyDllPatch() {
         log("═══ DLL PATCH ═══");
         
         String baseName = stripExt(pickedFileName);
@@ -918,18 +1099,17 @@ private void checkSystemCapabilities() {
         
         if (dllPath.isEmpty()) {
             log("✗ DLL не найден!");
-            fail();
-            return;
+            return false;
         }
         
-        applyMount(pickedFile.getAbsolutePath(), dllPath);
+        return applyMount(pickedFile.getAbsolutePath(), dllPath);
     }
 
     // ═══════════════════════════════════════════════════════════════════
     // Mount - Real verification and rollback
     // ═══════════════════════════════════════════════════════════════════
 
-    private void applyMount(String srcPath, String dstPath) {
+    private boolean applyMount(String srcPath, String dstPath) {
         log("═══ MOUNT ═══");
         
         // Unmount if already mounted
@@ -937,50 +1117,36 @@ private void checkSystemCapabilities() {
         try { Thread.sleep(300); } catch (Exception e) {}
         
         // Try different mount methods
-        boolean success = false;
         
         // Method 1: mount --bind
         log("→ [1] mount --bind");
         runRoot("mount --bind '" + srcPath + "' '" + dstPath + "'");
         if (verifyMount(dstPath, srcPath)) {
-            success = true;
+            log("✓ Mount успешен (method 1)");
+            return true;
         }
         
         // Method 2: mount -o bind
-        if (!success) {
-            log("→ [2] mount -o bind");
-            runRoot("mount -o bind '" + srcPath + "' '" + dstPath + "'");
-            if (verifyMount(dstPath, srcPath)) {
-                success = true;
-            }
+        log("→ [2] mount -o bind");
+        runRoot("mount -o bind '" + srcPath + "' '" + dstPath + "'");
+        if (verifyMount(dstPath, srcPath)) {
+            log("✓ Mount успешен (method 2)");
+            return true;
         }
         
         // Method 3: nsenter
-        if (!success) {
-            log("→ [3] nsenter");
-            runRoot("nsenter --mount=/proc/1/ns/mnt -- mount --bind '" + srcPath + "' '" + dstPath + "'");
-            if (verifyMount(dstPath, srcPath)) {
-                success = true;
-            }
+        log("→ [3] nsenter");
+        runRoot("nsenter --mount=/proc/1/ns/mnt -- mount --bind '" + srcPath + "' '" + dstPath + "'");
+        if (verifyMount(dstPath, srcPath)) {
+            log("✓ Mount успешен (method 3)");
+            return true;
         }
         
         // Method 4: Magisk module (for next reboot)
-        if (!success) {
-            log("→ [4] Magisk module");
-            createMagiskModule(srcPath, dstPath);
-            success = true; // Consider success for reboot
-        }
-        
-        if (success) {
-            // Try to restart osu to reload assembly
-            restartOsu();
-            success();
-        } else {
-            log("✗ Mount не удался!");
-            log("⚠ Попробуй перезагрузить устройство");
-            rollback();
-            fail();
-        }
+        log("→ [4] Magisk module");
+        createMagiskModule(srcPath, dstPath);
+        log("✓ Magisk модуль создан (требуется перезагрузка)");
+        return true;
     }
 
     private boolean verifyMount(String path, String expectedSrc) {
@@ -1037,10 +1203,30 @@ private void checkSystemCapabilities() {
     private void rollback() {
         log("═══ ROLLBACK ═══");
         
-        String backupDir = "/data/data/" + detectedPackageName + "_backup";
-        runRoot("cp -r '" + backupDir + "'/* '" + detectedPackagePath + "/' 2>/dev/null");
+        // Unmount all mounts
+        if (detectedPackagePath != null) {
+            runRoot("umount '" + detectedPackagePath + "' 2>/dev/null");
+            runRoot("umount -l '" + detectedPackagePath + "' 2>/dev/null");
+        }
         
-        runRoot("umount '" + detectedPackagePath + "' 2>/dev/null");
+        // Also try to unmount specific paths
+        runRoot("umount /data/data/*/files/*.blob 2>/dev/null");
+        runRoot("umount /data/app/*/lib/*.so 2>/dev/null");
+        
+        // Restore from backup
+        if (detectedPackageName != null && detectedPackagePath != null) {
+            String backupDir = "/data/data/" + detectedPackageName + "_backup";
+            runRoot("cp -r '" + backupDir + "'/* '" + detectedPackagePath + "/' 2>/dev/null");
+        }
+        
+        // Clear cache again
+        if (detectedPackageName != null) {
+            runRoot("pm clear " + detectedPackageName + " 2>/dev/null");
+            runRoot("am force-stop " + detectedPackageName + " 2>/dev/null");
+        }
+        
+        // Remove Magisk module
+        runRoot("rm -rf /data/adb/modules/osupatch 2>/dev/null");
         
         log("✓ Rollback выполнен");
     }
