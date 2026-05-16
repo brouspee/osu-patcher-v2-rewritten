@@ -15,50 +15,25 @@
         android:gravity="center"
         android:padding="8dp"/>
 
-    <EditText
-        android:id="@+id/et_target_name"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:hint="Assembly-CSharp (или оставь пустым)"
-        android:padding="8dp"/>
-
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal">
 
         <Button
-            android:id="@+id/btn_pick"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:text="Выбрать"/>
-
-        <Button
             android:id="@+id/btn_apply"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="Применить"/>
+            android:text="ВКЛ"/>
 
         <Button
             android:id="@+id/btn_unmount"
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="Снять"/>
+            android:text="ВЫКЛ"/>
     </LinearLayout>
-
-    <!-- Settings Button -->
-    <Button
-        android:id="@+id/btn_settings"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Настройки чита"
-        android:textSize="12sp"
-        android:textColor="#FF66AA"
-        android:backgroundTint="#1E1E30"
-        android:layout_marginTop="8dp"/>
 
     <ScrollView
         android:id="@+id/scroll_log"
