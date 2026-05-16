@@ -462,8 +462,16 @@ private void checkSystemCapabilities() {
     private void findTargetFiles() {
         log("═══ ПОИСК ФАЙЛОВ ═══");
         
-        String baseName = pickedFileName != null ? 
-            pickedFileName.substring(0, pickedFileName.lastIndexOf('.')) : "Assembly-CSharp";
+        // For osu!lazer the main assembly is always Assembly-CSharp
+        String baseName = "Assembly-CSharp";
+        
+        // If user specified a specific target, use that
+        String customName = etTargetName.getText().toString().trim();
+        if (!customName.isEmpty()) {
+            baseName = customName;
+        }
+        
+        log("Ищу: " + baseName);
         
         // 1. Ищем blob файлы (в assemblies или корне)
         String blobs = runRoot("find '" + detectedPackagePath + "' -name '*.blob' 2>/dev/null").trim();
@@ -477,21 +485,19 @@ private void checkSystemCapabilities() {
         if (!blobs.isEmpty()) {
             targetType = "blob";
             log("Найден blob: " + blobs.split("\n")[0]);
-            
-            // Проверяем целостность blob
             checkBlobIntegrity(new File(blobs.split("\n")[0]));
             return;
         }
         
-        // 2. Ищем AOT .so файлы
+        // 2. Ищем AOT .so файлы - сначала точно Assembly-CSharp
         for (String nm : new String[]{
+                "libaot-Assembly-CSharp.dll.so",
                 "libaot-" + baseName + ".dll.so",
                 "libaot-" + baseName + ".so",
                 baseName + ".dll.so"}) {
             String so = runRoot("find '" + detectedPackagePath + "' -name '" + nm + "' 2>/dev/null").trim();
             if (!so.isEmpty()) {
                 targetType = "so";
-                // Сохраняем hash оригинала
                 originalFileHash = runRoot("md5sum '" + so + "' 2>/dev/null").trim().split("\\s+")[0];
                 log("Найден AOT: " + so);
                 log("Original hash: " + originalFileHash);
@@ -500,20 +506,28 @@ private void checkSystemCapabilities() {
         }
         
         // 3. Ищем .dll файлы
-        String dll = runRoot("find '" + detectedPackagePath + "' -name '" + baseName + ".dll' 2>/dev/null").trim();
-        if (dll.isEmpty()) {
-            dll = runRoot("find '" + detectedPackagePath + "' -name '*.dll' 2>/dev/null | head -5").trim();
-        }
-        if (!dll.isEmpty()) {
-            targetType = "dll";
-            originalFileHash = runRoot("md5sum '" + dll.split("\n")[0] + "' 2>/dev/null").trim().split("\\s+")[0];
-            log("Найден dll: " + dll.split("\n")[0]);
-            log("Original hash: " + originalFileHash);
-            return;
+        for (String dllName : new String[]{"Assembly-CSharp.dll", baseName + ".dll"}) {
+            String dll = runRoot("find '" + detectedPackagePath + "' -name '" + dllName + "' 2>/dev/null").trim();
+            if (!dll.isEmpty()) {
+                targetType = "dll";
+                originalFileHash = runRoot("md5sum '" + dll + "' 2>/dev/null").trim().split("\\s+")[0];
+                log("Найден dll: " + dll);
+                log("Original hash: " + originalFileHash);
+                return;
+            }
         }
         
-        // 4. fuzzy search
-        String fuzzy = runRoot("find '" + detectedPackagePath + "' -name '*.so' 2>/dev/null | grep -iE 'assembly|csharp|game' | head -3").trim();
+        // 4. List all available assemblies
+        String allDlls = runRoot("find '" + detectedPackagePath + "' -name '*.dll' 2>/dev/null").trim();
+        if (!allDlls.isEmpty()) {
+            log("Доступные DLL:");
+            for (String dll : allDlls.split("\n")) {
+                log("  " + new java.io.File(dll).getName());
+            }
+        }
+        
+        // 5. Fuzzy search for any assembly
+        String fuzzy = runRoot("find '" + detectedPackagePath + "' -name '*.so' 2>/dev/null | grep -i 'assembly' | head -5").trim();
         if (!fuzzy.isEmpty()) {
             targetType = "so";
             String firstSo = fuzzy.split("\n")[0];
@@ -653,7 +667,8 @@ private void checkSystemCapabilities() {
         }
         
         String inp = etTargetName.getText().toString().trim();
-        final String targetName = inp.isEmpty() ? stripExt(pickedFileName) : inp;
+        // Default to Assembly-CSharp (main osu! assembly) instead of picked file name
+        final String targetName = inp.isEmpty() ? "Assembly-CSharp" : inp;
         
         btnApply.setEnabled(false);
         setStatus("Применяю...", "#FF9800");
