@@ -852,19 +852,49 @@ private void checkSystemCapabilities() {
     }
 
     private int getOsuPid() {
-        String pidof = runRoot("pidof " + detectedPackageName + " 2>/dev/null").trim();
-        if (!pidof.isEmpty()) {
-            try { return Integer.parseInt(pidof.split("\\s+")[0]); }
-            catch (Exception e) {}
-        }
-        
-        // Alternative: use pidof from ps
-        String ps = runRoot("ps -A 2>/dev/null | grep -i '" + detectedPackageName + "'").trim();
-        if (!ps.isEmpty()) {
-            String[] parts = ps.split("\\s+");
-            if (parts.length > 0) {
-                try { return Integer.parseInt(parts[0]); }
+        // Try multiple times with delay in case process just started
+        for (int attempt = 0; attempt < 10; attempt++) {
+            // Method 1: pidof
+            String pidof = runRoot("pidof " + detectedPackageName + " 2>/dev/null").trim();
+            if (!pidof.isEmpty()) {
+                try { return Integer.parseInt(pidof.split("\\s+")[0]); }
                 catch (Exception e) {}
+            }
+            
+            // Method 2: ps piped through grep
+            String ps = runRoot("ps -A 2>/dev/null | grep -i '" + detectedPackageName + "'").trim();
+            if (!ps.isEmpty()) {
+                String[] lines = ps.split("\n");
+                for (String line : lines) {
+                    String[] parts = line.split("\\s+");
+                    if (parts.length > 0) {
+                        try { 
+                            int pid = Integer.parseInt(parts[0]);
+                            if (pid > 0) return pid;
+                        } catch (Exception e) {}
+                    }
+                }
+            }
+            
+            // Method 3: Direct /proc search - iterate through all PIDs
+            String procs = runRoot("ls /proc/ 2>/dev/null | grep -E '^[0-9]+$'").trim();
+            if (!procs.isEmpty()) {
+                for (String pidStr : procs.split("\n")) {
+                    try {
+                        int pid = Integer.parseInt(pidStr.trim());
+                        if (pid > 100) { // Skip kernel processes
+                            String cmdline = runRoot("cat /proc/" + pid + "/cmdline 2>/dev/null").replace("\0", " ");
+                            if (cmdline.toLowerCase().contains(detectedPackageName.toLowerCase())) {
+                                return pid;
+                            }
+                        }
+                    } catch (Exception e) {}
+                }
+            }
+            
+            // Wait before retry
+            if (attempt < 9) {
+                try { Thread.sleep(500); } catch (Exception e) {}
             }
         }
         
