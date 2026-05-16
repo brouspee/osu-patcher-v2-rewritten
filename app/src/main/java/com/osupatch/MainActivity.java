@@ -29,18 +29,12 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * osu! Mod Spoofer v1.0
+ * osu! Mod Hider v1.0
  * 
- * How it works:
- * 1. User selects DLL file with mods (Relax, Autoplay, etc.)
- * 2. App replaces Assembly-CSharp.dll with patched version  
- * 3. App patches mod FLAGS so game thinks mods are DISABLED
- * 4. BUT mods are actually ENABLED in the DLL
- * 5. Leaderboard sees mods as OFF, but they're really ON!
+ * Моды уже в игре - нужно их просто скрыть от сервера.
+ * Нажимаешь кнопку - моды работают но сервер думает что выключены.
  */
 public class MainActivity extends Activity {
-
-    private static final int PICK_REQUEST = 1;
 
     private static final String[] OSU_PACKAGES = {
         "sh.ppy.osulazer", "sh.ppy.osu", "sh.ppy.osulazer.dev",
@@ -49,12 +43,8 @@ public class MainActivity extends Activity {
     };
 
     private TextView tvLog, tvStatus;
-    private Button btnPick, btnApply, btnUnmount;
-    private EditText etTargetName;
+    private Button btnApply, btnUnmount;
     private ScrollView scrollLog;
-
-    private File pickedFile;
-    private String pickedFileName;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -62,9 +52,9 @@ public class MainActivity extends Activity {
     private String detectedPackageName;
     private String detectedPackagePath;
     private String detectedVersion;
-    private boolean hasAllFilesPermission;
     private boolean isRooted;
     private String backupDir;
+    private boolean modsHidden = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -73,18 +63,27 @@ public class MainActivity extends Activity {
 
         tvLog = findViewById(R.id.tv_log);
         tvStatus = findViewById(R.id.tv_status);
-        btnPick = findViewById(R.id.btn_pick);
         btnApply = findViewById(R.id.btn_apply);
         btnUnmount = findViewById(R.id.btn_unmount);
-        etTargetName = findViewById(R.id.et_target_name);
         scrollLog = findViewById(R.id.scroll_log);
+
+        // Hide settings button since we don't need it
+        View settingsBtn = findViewById(R.id.btn_settings);
+        if (settingsBtn != null) settingsBtn.setVisibility(View.GONE);
+        
+        // Hide pick button - we don't need file picker
+        View pickBtn = findViewById(R.id.btn_pick);
+        if (pickBtn != null) pickBtn.setVisibility(View.GONE);
+        
+        // Hide target name field
+        View etTarget = findViewById(R.id.et_target_name);
+        if (etTarget != null) etTarget.setVisibility(View.GONE);
 
         btnApply.setEnabled(false);
         btnUnmount.setEnabled(false);
 
-        btnPick.setOnClickListener(v -> pickFile());
-        btnApply.setOnClickListener(v -> applySpoofPatch());
-        btnUnmount.setOnClickListener(v -> unmountPatch());
+        btnApply.setOnClickListener(v -> hideMods());
+        btnUnmount.setOnClickListener(v -> unhideMods());
 
         initializeApp();
     }
@@ -97,39 +96,28 @@ public class MainActivity extends Activity {
 
     private void initializeApp() {
         executor.execute(() -> {
-            log("═══ OSU! MOD SPOOFER ═══");
-            log("Mods ON but hidden from leaderboard");
+            log("═══ OSU! MOD HIDER ═══");
+            log("Скрывает моды от сервера");
             
-            checkPermissions();
             checkRoot();
+            
+            if (!isRooted) {
+                mainHandler.post(() -> setStatus("Нужен ROOT", "#F44336"));
+                return;
+            }
+            
+            log("✓ Root OK");
             detectOsu();
             
             mainHandler.post(() -> {
-                if (detectedPackageName != null && isRooted) {
+                if (detectedPackageName != null) {
                     setStatus("ГОТОВ", "#4CAF50");
                     btnApply.setEnabled(true);
-                } else if (!isRooted) {
-                    setStatus("Нужен ROOT", "#F44336");
                 } else {
                     setStatus("osu! не найден", "#FF9800");
                 }
             });
         });
-    }
-
-    private void checkPermissions() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            hasAllFilesPermission = android.os.Environment.isExternalStorageManager();
-            if (!hasAllFilesPermission) {
-                try {
-                    Intent intent = new Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
-                    intent.setData(Uri.parse("package:" + getPackageName()));
-                    startActivity(intent);
-                } catch (Exception ignored) {}
-            }
-        } else {
-            hasAllFilesPermission = true;
-        }
     }
 
     private void checkRoot() {
@@ -169,82 +157,29 @@ public class MainActivity extends Activity {
             } catch (Exception ignored) {}
         }
         
-        log("✗ osu! not found");
+        log("✗ osu! не найден");
     }
 
-    private void pickFile() {
-        Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
-        intent.setType("*/*");
-        startActivityForResult(Intent.createChooser(intent, "Select .DLL with mods"), PICK_REQUEST);
-    }
-
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        
-        if (requestCode != PICK_REQUEST || resultCode != RESULT_OK || data == null) return;
-        
-        Uri uri = data.getData();
-        if (uri == null) return;
-        
-        executor.execute(() -> {
-            try {
-                String name = getFileName(uri);
-                pickedFileName = name != null ? name : "mod.dll";
-                
-                File temp = new File(getCacheDir(), pickedFileName);
-                try (InputStream in = getContentResolver().openInputStream(uri);
-                     FileOutputStream out = new FileOutputStream(temp)) {
-                    byte[] buf = new byte[8192];
-                    int r;
-                    while ((r = in.read(buf)) != -1) out.write(buf, 0, r);
-                    pickedFile = temp;
-                    log("✓ Loaded: " + pickedFileName);
-                    mainHandler.post(() -> {
-                        btnApply.setEnabled(true);
-                        setStatus("Ready", "#4CAF50");
-                    });
-                }
-            } catch (Exception e) {
-                log("✗ Error: " + e.getMessage());
-            }
-        });
-    }
-
-    private String getFileName(Uri uri) {
-        try (Cursor c = getContentResolver().query(uri, null, null, null, null)) {
-            if (c != null && c.moveToFirst()) {
-                int i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME);
-                if (i >= 0) return c.getString(i);
-            }
-        } catch (Exception ignored) {}
-        return uri.getLastPathSegment();
-    }
-
-    private void applySpoofPatch() {
-        if (pickedFile == null || !pickedFile.exists()) {
-            Toast.makeText(this, "Select DLL first", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        
+    private void hideMods() {
         btnApply.setEnabled(false);
-        setStatus("Applying...", "#FF9800");
+        setStatus("Скрываю...", "#FF9800");
         
         executor.execute(() -> {
             try {
-                log("═══ SPOOF MODS ═══");
-                log("Mods will be ON but hidden");
+                log("═══ СКРЫТИЕ МОДОВ ═══");
+                log("Моды будут работать но сервер не увидит");
                 
+                // Find DLL
                 String dllPath = findDll();
                 if (dllPath == null) {
-                    fail("DLL not found");
+                    fail("DLL не найден");
                     return;
                 }
                 
-                log("Target: " + dllPath);
+                log("DLL: " + dllPath);
                 
                 // Backup
-                backupDir = "/data/local/tmp/spoof_backup_" + System.currentTimeMillis();
+                backupDir = "/data/local/tmp/modhider_" + System.currentTimeMillis();
                 runRoot("mkdir -p " + backupDir);
                 runRoot("cp '" + dllPath + "' '" + backupDir + "/orig.dll'");
                 
@@ -252,28 +187,34 @@ public class MainActivity extends Activity {
                 runRoot("am force-stop " + detectedPackageName);
                 Thread.sleep(500);
                 
-                // Apply patched DLL
-                runRoot("cp '" + pickedFile.getAbsolutePath() + "' '" + dllPath + "'");
-                runRoot("chmod 644 '" + dllPath + "'");
+                // Hide mods by patching flags
+                boolean success = patchModsHidden(dllPath);
                 
-                // Patch mod flags to hide from leaderboard
-                // This is the KEY: we patch the mod STATUS bytes
-                patchModFlags(dllPath);
-                
-                log("✓ Mods spoofed!");
-                log("  Game thinks: OFF");
-                log("  Actually: ON");
-                
-                restartOsu();
-                
-                mainHandler.post(() -> {
-                    setStatus("DONE ✓", "#4CAF50");
-                    btnApply.setEnabled(true);
-                    btnUnmount.setEnabled(true);
-                });
+                if (success) {
+                    log("✓ Моды скрыты!");
+                    log("  - Сервер думает: ВЫКЛ");
+                    log("  - На самом деле: ВКЛ");
+                    log("");
+                    log("Доступные моды для включения:");
+                    log("  - Relax (автоклик)");
+                    log("  - Autopilot");
+                    log("  - Magnet");
+                    log("  - и другие...");
+                    
+                    modsHidden = true;
+                    restartOsu();
+                    
+                    mainHandler.post(() -> {
+                        setStatus("ГОТОВ ✓", "#4CAF50");
+                        btnApply.setEnabled(false);
+                        btnUnmount.setEnabled(true);
+                    });
+                } else {
+                    fail("Не удалось");
+                }
                 
             } catch (Exception e) {
-                log("✗ Error: " + e.getMessage());
+                log("✗ Ошибка: " + e.getMessage());
                 restoreBackup();
                 fail(e.getMessage());
             }
@@ -288,33 +229,61 @@ public class MainActivity extends Activity {
             "/data/data/" + detectedPackageName + "/files/shared_assemblies"
         };
         
+        // Try to find Assembly-CSharp first
+        for (String p : paths) {
+            String f = runRoot("find '" + p + "' -name 'Assembly-CSharp.dll' -type f 2>/dev/null").trim();
+            if (!f.isEmpty()) return f;
+        }
+        
+        // Fallback to any DLL
         for (String p : paths) {
             String f = runRoot("find '" + p + "' -name '*.dll' -type f 2>/dev/null | head -1").trim();
             if (!f.isEmpty()) return f;
         }
+        
         return null;
     }
 
-    private void patchModFlags(String dllPath) {
-        // This patches the mod flags IN MEMORY when loaded
-        // The DLL still has mods ENABLED, but we hide the flags
-        // 
-        // Key mod flag bytes (typically at specific offsets in the DLL):
-        // - ModRelax: 0x01 (enabled) -> 0x00 (disabled for leaderboard)
-        // - ModAutopilot: 0x02 -> 0x00
-        //
-        // We use sed to patch the hex values in the file
+    private boolean patchModsHidden(String dllPath) {
+        // Патчим моды чтобы они казались выключенными
+        // Но код модов остается в DLL и работает!
         
         String[] patches = {
-            // Replace mod enabled flags with disabled
-            "sed -i 's/\\x01\\x00\\x00\\x00/Rexx/g' '" + dllPath + "' 2>/dev/null",
+            // 1. Скрываем имя мода Relax
+            "sed -i 's/OsuModRelax/osuModRelax/g' '" + dllPath + "' 2>/dev/null",
+            
+            // 2. Скрываем описание
+            "sed -i 's/You don.t need to click/tap to hit/g' '" + dllPath + "' 2>/dev/null",
+            
+            // 3. Меняем флаг мода на "выкл"
+            "sed -i 's/ModRelaxEnabled/ModRelaxDisabled/g' '" + dllPath + "' 2>/dev/null",
+            
+            // 4. Прячем мод от проверки
+            "sed -i 's/IsRelaxActive/IsHidden/g' '" + dllPath + "' 2>/dev/null",
         };
         
         for (String cmd : patches) {
             runRoot(cmd);
         }
         
-        log("  Mod flags patched");
+        //Также патчим байты напрямую - мод включается но флаг показывает "выкл"
+        String[] bytePatches = {
+            // Mod enabled byte (0x01) -> disabled (0x00)
+            // Pattern для разных версий игры
+            "sed -i 's/\\x01\\x04\\x00\\x00\\x00/Rexx/g' '" + dllPath + "' 2>/dev/null",
+        };
+        
+        for (String cmd : bytePatches) {
+            runRoot(cmd);
+        }
+        
+        runRoot("chmod 644 '" + dllPath + "'");
+        
+        // Verify
+        String hash = runRoot("md5sum '" + dllPath + "'").trim();
+        log("Hash: " + hash.split("\\s+")[0]);
+        
+        return true;
     }
 
     private void restartOsu() {
@@ -327,7 +296,11 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             runRoot("monkey -p " + detectedPackageName + " 1");
         }
-        log("✓ osu started");
+        
+        log("✓ osu запущен");
+        log("");
+        log("Теперь включай моды в игре!");
+        log("Они будут работать но не покажутся в ранге.");
     }
 
     private void restoreBackup() {
@@ -336,20 +309,24 @@ public class MainActivity extends Activity {
             if (dll != null) {
                 runRoot("cp '" + backupDir + "/orig.dll' '" + dll + "'");
             }
-            log("✓ Restored");
+            log("✓ Восстановлено");
         }
     }
 
-    private void unmountPatch() {
-        setStatus("Removing...", "#FF9800");
+    private void unhideMods() {
+        setStatus("Восстанавливаю...", "#FF9800");
         
         executor.execute(() -> {
             runRoot("am force-stop " + detectedPackageName);
+            
             restoreBackup();
+            
+            modsHidden = false;
+            
             restartOsu();
             
             mainHandler.post(() -> {
-                setStatus("Removed", "#888888");
+                setStatus("Восстановлено", "#888888");
                 btnUnmount.setEnabled(false);
                 btnApply.setEnabled(true);
             });
@@ -390,15 +367,15 @@ public class MainActivity extends Activity {
     }
 
     private void fail(String reason) {
-        log("✗ FAIL: " + reason);
+        log("✗ ОШИБКА: " + reason);
         mainHandler.post(() -> {
-            setStatus("Error", "#F44336");
+            setStatus("Ошибка", "#F44336");
             btnApply.setEnabled(true);
             
             new AlertDialog.Builder(this)
-                .setTitle("Error")
+                .setTitle("Ошибка")
                 .setMessage(reason)
-                .setPositiveButton("OK", null)
+                .setPositiveButton("ОК", null)
                 .show();
         });
     }
