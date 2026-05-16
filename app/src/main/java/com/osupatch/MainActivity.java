@@ -5,6 +5,7 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -12,8 +13,11 @@ import android.view.View;
 import android.widget.Button;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.io.BufferedReader;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.File;
 import java.io.InputStreamReader;
 import java.text.SimpleDateFormat;
@@ -21,9 +25,10 @@ import java.util.Date;
 import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 /**
- * osu! Mod Hider v7.0 - Phone Universal
+ * osu! Mod Hider v8.0 - Debug Root
  */
 public class MainActivity extends Activity {
 
@@ -33,9 +38,17 @@ public class MainActivity extends Activity {
         "com.reco1l.rimu", "com.reco1l.rimu.stable"
     };
 
+    // More complete su paths
     private static final String[] SU_PATHS = {
-        "/system/bin/su", "/system/xbin/su", "/sbin/su", 
-        "/system/sbin/su", "/vendor/bin/su", "/data/local/bin/su"
+        "/system/bin/su",
+        "/system/xbin/su", 
+        "/sbin/su",
+        "/system/sbin/su",
+        "/vendor/bin/su",
+        "/data/local/bin/su",
+        "/data/adb/magisk/su",
+        "/data/adb/magisk/bin/su",
+        "/system/app/Superuser/Superuser.apk"
     };
 
     private TextView tvLog, tvStatus;
@@ -49,6 +62,7 @@ public class MainActivity extends Activity {
     private String detectedPackageName;
     private String detectedPackagePath;
     private String backupDir;
+    private boolean hasRoot = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -69,20 +83,51 @@ public class MainActivity extends Activity {
         btnApply.setOnClickListener(v -> hideMods());
         btnUnmount.setOnClickListener(v -> unhideMods());
 
+        log("Device: " + Build.MANUFACTURER + " " + Build.MODEL);
+        log("Android: " + Build.VERSION.RELEASE);
+        
         initializeApp();
     }
 
     private void initializeApp() {
         executor.execute(() -> {
-            log("OSU! MOD SPOOFER v7.0");
+            log("=== OSU! MOD SPOOFER v8.0 ===");
             log("");
             
-            if (!checkRootAccess()) {
-                mainHandler.post(() -> setStatus("Нужен ROOT", "#F44336"));
+            // List all su paths
+            log("Checking su locations...");
+            for (String p : SU_PATHS) {
+                boolean exists = new File(p).exists();
+                log(p + " = " + (exists ? "EXISTS" : "not found"));
+                if (exists && suPath == null) {
+                    suPath = p;
+                }
+            }
+            
+            if (suPath == null) {
+                log("ERROR: No su found!");
+                mainHandler.post(() -> {
+                    setStatus("SU не найден", "#F44336");
+                });
                 return;
             }
             
-            log("Root OK!");
+            log("");
+            log("Using su: " + suPath);
+            log("Requesting root...");
+            
+            // Try to get root - this should trigger Magisk
+            hasRoot = requestRoot();
+            
+            log("Root result: " + (hasRoot ? "GRANTED" : "DENIED/FAILED"));
+            
+            if (!hasRoot) {
+                mainHandler.post(() -> {
+                    setStatus("ROOT отклонён", "#F44336");
+                });
+                return;
+            }
+            
             detectOsu();
             
             if (detectedPackageName != null) {
@@ -91,77 +136,70 @@ public class MainActivity extends Activity {
                     btnApply.setEnabled(true);
                 });
             } else {
-                mainHandler.post(() -> setStatus("osu! не найден", "#FF9800"));
+                mainHandler.post(() -> {
+                    setStatus("osu! не найден", "#FF9800");
+                });
             }
         });
     }
 
-    private boolean checkRootAccess() {
-        suPath = findSu();
-        if (suPath == null) {
-            log("su not found");
-            return false;
-        }
-        log("su: " + suPath);
-        
-        // Try su -c id - this prompts Magisk
-        return tryRootCmd(new String[]{suPath, "-c", "id"});
-    }
-
-    private boolean tryRootCmd(String[] cmd) {
+    private boolean requestRoot() {
         try {
-            ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
+            // Execute su -c id
+            Process process = Runtime.getRuntime().exec(suPath + " -c id");
             
-            BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()));
-            StringBuilder sb = new StringBuilder();
+            // Read output
+            BufferedReader reader = new BufferedReader(
+                new InputStreamReader(process.getInputStream()));
+            
+            StringBuilder output = new StringBuilder();
             String line;
             
-            int timeout = 0;
-            while (timeout < 30 && p.isAlive()) {
-                Thread.sleep(100);
-                timeout++;
+            // Wait for output with timeout
+            long startTime = System.currentTimeMillis();
+            while (System.currentTimeMillis() - startTime < 10000) {
+                if (!process.isAlive()) break;
+                Thread.sleep(50);
             }
             
-            while ((line = br.readLine()) != null) {
-                sb.append(line).append("\n");
+            while ((line = reader.readLine()) != null) {
+                output.append(line).append("\n");
             }
             
-            p.waitFor();
-            String output = sb.toString();
-            log("Output: " + output.substring(0, Math.min(50, output.length())));
+            int exitCode = process.waitFor();
+            String result = output.toString();
             
-            return output.contains("uid=0");
+            log("id output: " + result.trim());
+            log("exit code: " + exitCode);
+            
+            // Check if we got root (uid=0)
+            return result.contains("uid=0");
             
         } catch (Exception e) {
-            log("Error: " + e.getMessage());
+            log("Root request error: " + e.getMessage());
+            e.printStackTrace();
             return false;
         }
-    }
-
-    private String findSu() {
-        for (String path : SU_PATHS) {
-            if (new File(path).exists()) return path;
-        }
-        return null;
     }
 
     private void detectOsu() {
+        log("Searching for osu...");
         for (String pkg : OSU_PACKAGES) {
             try {
                 PackageManager pm = getPackageManager();
                 PackageInfo pi = pm.getPackageInfo(pkg, 0);
                 if (pi != null && pi.applicationInfo != null) {
                     detectedPackageName = pkg;
-                    detectedPackagePath = pi.applicationInfo.sourceDir;
-                    if (detectedPackagePath != null && detectedPackagePath.endsWith(".apk")) {
-                        detectedPackagePath = detectedPackagePath.substring(0, detectedPackagePath.lastIndexOf('/'));
-                    }
+                    // Get the actual data directory
+                    detectedPackagePath = pi.applicationInfo.dataDir;
+                    
                     log("Found: " + pkg);
+                    log("Data dir: " + detectedPackagePath);
                     return;
                 }
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                // Package not found, continue
+            }
         }
     }
 
@@ -177,14 +215,24 @@ public class MainActivity extends Activity {
                     return;
                 }
                 
-                backupDir = "/data/local/tmp/hide_" + System.currentTimeMillis();
-                runRoot("mkdir -p " + backupDir);
-                runRoot("cp '" + dllPath + "' '" + backupDir + "/orig.dll'");
+                log("DLL: " + dllPath);
                 
-                runRoot("am force-stop " + detectedPackageName);
+                // Backup
+                backupDir = "/data/data/" + detectedPackageName + "/files/hide_" + System.currentTimeMillis();
+                runRootCmd("mkdir -p " + backupDir);
+                runRootCmd("cp '" + dllPath + "' '" + backupDir + "/orig.dll'");
+                log("Backup done");
+                
+                // Stop osu
+                runRootCmd("am force-stop " + detectedPackageName);
                 Thread.sleep(500);
                 
-                fullHidePatch(dllPath);
+                // Patch
+                runRootCmd("chmod 644 '" + dllPath + "'");
+                runRootCmd("sed -i 's/UserPlayable = true/UserPlayable = false/g' '" + dllPath + "' 2>/dev/null || true");
+                log("Patch done");
+                
+                // Restart
                 restartOsu();
                 
                 mainHandler.post(() -> {
@@ -192,7 +240,10 @@ public class MainActivity extends Activity {
                     btnUnmount.setEnabled(true);
                 });
                 
+                log("DONE!");
+                
             } catch (Exception e) {
+                log("ERROR: " + e.getMessage());
                 fail(e.getMessage());
             }
         });
@@ -201,18 +252,24 @@ public class MainActivity extends Activity {
     private String findDll() {
         if (detectedPackagePath == null) return null;
         
-        String[] paths = {detectedPackagePath, detectedPackagePath + "/files", detectedPackagePath + "/files/shared_assemblies"};
+        // Try common locations
+        String[] searchPaths = {
+            detectedPackagePath + "/files",
+            detectedPackagePath + "/files/shared_assemblies",
+            detectedPackagePath + "/lib"
+        };
         
-        for (String p : paths) {
-            String result = runRoot("find '" + p + "' -name 'Assembly-CSharp.dll' -type f 2>/dev/null | head -1").trim();
-            if (!result.isEmpty()) return result;
+        for (String base : searchPaths) {
+            try {
+                String result = runRootCmd("find '" + base + "' -name 'Assembly-CSharp.dll' 2>/dev/null | head -1").trim();
+                if (!result.isEmpty()) {
+                    return result;
+                }
+            } catch (Exception e) {
+                // Continue
+            }
         }
         return null;
-    }
-
-    private void fullHidePatch(String dllPath) {
-        runRoot("chmod 644 '" + dllPath + "'");
-        runRoot("sed -i 's/UserPlayable = true/UserPlayable = false/g' '" + dllPath + "' 2>/dev/null || true");
     }
 
     private void restartOsu() {
@@ -221,18 +278,21 @@ public class MainActivity extends Activity {
             if (i != null) {
                 i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                 startActivity(i);
+                log("Started osu!");
             }
         } catch (Exception e) {
-            runRoot("monkey -p " + detectedPackageName + " 1");
+            runRootCmd("monkey -p " + detectedPackageName + " 1");
         }
     }
 
     private void restoreBackup() {
         if (backupDir == null) return;
+        
         String dll = findDll();
         if (dll != null) {
-            runRoot("cp '" + backupDir + "/orig.dll' '" + dll + "'");
-            runRoot("chmod 644 '" + dll + "'");
+            runRootCmd("cp '" + backupDir + "/orig.dll' '" + dll + "'");
+            runRootCmd("chmod 644 '" + dll + "'");
+            log("Restored");
         }
     }
 
@@ -240,7 +300,7 @@ public class MainActivity extends Activity {
         setStatus("Выключаю...", "#FF9800");
         
         executor.execute(() -> {
-            runRoot("am force-stop " + detectedPackageName);
+            runRootCmd("am force-stop " + detectedPackageName);
             restoreBackup();
             restartOsu();
             
@@ -252,32 +312,36 @@ public class MainActivity extends Activity {
         });
     }
 
-    private String runRoot(String cmd) {
-        if (suPath == null) return "";
+    private String runRootCmd(String cmd) {
+        if (suPath == null || !hasRoot) {
+            log("No root, skipping: " + cmd);
+            return "";
+        }
         
         try {
-            ProcessBuilder pb = new ProcessBuilder(suPath, "-c", cmd);
-            pb.redirectErrorStream(true);
-            Process p = pb.start();
+            Process process = Runtime.getRuntime().exec(suPath + " -c " + cmd);
             
-            BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()));
-            StringBuilder sb = new StringBuilder();
+            BufferedReader reader = new BufferedReader(
+                new InputStreamReader(process.getInputStream()));
+            
+            StringBuilder output = new StringBuilder();
             String line;
             
-            int timeout = 0;
-            while (timeout < 50 && p.isAlive()) {
-                Thread.sleep(100);
-                timeout++;
+            long startTime = System.currentTimeMillis();
+            while (System.currentTimeMillis() - startTime < 10000) {
+                if (!process.isAlive()) break;
+                Thread.sleep(50);
             }
             
-            while ((line = br.readLine()) != null) {
-                sb.append(line).append("\n");
+            while ((line = reader.readLine()) != null) {
+                output.append(line).append("\n");
             }
             
-            p.waitFor();
-            return sb.toString().trim();
+            process.waitFor();
+            return output.toString().trim();
             
         } catch (Exception e) {
+            log("Cmd error: " + e.getMessage());
             return "";
         }
     }
@@ -303,7 +367,17 @@ public class MainActivity extends Activity {
         mainHandler.post(() -> {
             setStatus("Ошибка", "#F44336");
             btnApply.setEnabled(true);
-            new AlertDialog.Builder(this).setTitle("Ошибка").setMessage(reason).setPositiveButton("ОК", null).show();
+            new AlertDialog.Builder(this)
+                .setTitle("Ошибка")
+                .setMessage(reason)
+                .setPositiveButton("ОК", null)
+                .show();
         });
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        executor.shutdown();
     }
 }
