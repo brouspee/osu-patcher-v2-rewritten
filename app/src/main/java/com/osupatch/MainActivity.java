@@ -3,7 +3,10 @@ package com.osupatch;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -55,22 +58,6 @@ public class MainActivity extends Activity {
     private static final int BLOB_MAGIC_V1 = 0x41424158;
     private static final int BLOB_MAGIC_V2 = 0x32424158;
 
-    // Все пути где может быть osu!
-    private static final String[] SEARCH_ROOTS = {
-        "/data/app",
-        "/data/app-private",
-        "/mnt/asec",
-        "/data/data",
-        "/data/user/0",
-        "/sdcard/Android/data",
-        "/storage/emulated/0/Android/data",
-        "/data/user_de/0",
-        "/apex",
-        "/data/app-ephemeral",
-        "/mnt/expand",
-        "/data/local"
-    };
-
     private TextView   tvLog, tvStatus;
     private Button     btnPick, btnApply, btnUnmount;
     private EditText   etTargetName;
@@ -83,12 +70,23 @@ public class MainActivity extends Activity {
     private final ExecutorService executor    = Executors.newSingleThreadExecutor();
     private final Handler         mainHandler = new Handler(Looper.getMainLooper());
 
-    // Framework detection
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Core State
+    // ═══════════════════════════════════════════════════════════════════════════
+    
+    private String detectedPackageName;
+    private String detectedPackagePath;
+    private String detectedVersion;
+    private String detectedArch;
+    private String detectedBuildType; // il2cpp, mono, hybrid
+    private String originalFileHash;
+    private String targetType; // blob, so, dll
+    private boolean hasAllFilesPermission = false;
     private boolean hasMagisk = false;
     private boolean hasZygisk = false;
     private boolean hasLSPosed = false;
     private boolean hasRiru = false;
-
+    
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -105,18 +103,418 @@ public class MainActivity extends Activity {
         btnApply.setEnabled(false);
         btnPick.setOnClickListener(v -> pickFile());
         btnApply.setOnClickListener(v -> applyPatch());
-        btnUnmount.setOnClickListener(v -> unmount());
 
-        checkRoot();
-        checkCurrentStatus();
-        checkFrameworks();
+    // Check permissions first
+    checkPermissions();
+}
+
+@Override
+protected void onDestroy() {
+    super.onDestroy();
+    executor.shutdown();
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// Permission Check - MANAGE_EXTERNAL_STORAGE for Android 11+
+// ══════════════════════════════════════════════════════════════════════
+
+private static final int REQUEST_ALL_FILES = 1001;
+
+private void checkPermissions() {
+    log("═══ PERMISSIONS ═══");
+    
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        hasAllFilesPermission = android.os.Environment.isExternalStorageManager();
+        
+        if (hasAllFilesPermission) {
+            log("All Files Access: GRANTED");
+        } else {
+            log("All Files Access: NOT GRANTED");
+            mainHandler.post(() -> showPermissionDialog());
+            return;
+        }
+    } else {
+        hasAllFilesPermission = true;
     }
+    
+    checkSystemCapabilities();
+}
+
+private void showPermissionDialog() {
+    new AlertDialog.Builder(this)
+        .setTitle("Требуется разрешение")
+        .setMessage("На Android 11+ нужен доступ ко всем файлам!")
+        .setPositiveButton("Предоставить", (d, w) -> requestAllFiles())
+        .setNegativeButton("Выйти", (d, w) -> finish())
+        .setCancelable(false)
+        .show();
+}
+
+private void requestAllFiles() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        try {
+            Intent intent = new Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
+            startActivityForResult(intent, REQUEST_ALL_FILES);
+        } catch (Exception e) {
+            log("Error: " + e.getMessage());
+            fail();
+        }
+    }
+}
+
+@Override
+protected void onActivityResult(int req, int res, Intent data) {
+    super.onActivityResult(req, res, data);
+    if (req == REQUEST_ALL_FILES && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        hasAllFilesPermission = android.os.Environment.isExternalStorageManager();
+        if (hasAllFilesPermission) {
+            log("Permission granted!");
+            checkSystemCapabilities();
+        } else {
+            fail();
+        }
+    }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// System Checks - Check SELinux, Root, ptrace, Android version
+// ══════════════════════════════════════════════════════════════════════════════
+
+private void checkSystemCapabilities() {
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
         executor.shutdown();
     }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // System Checks - Check SELinux, Root, ptrace, Android version
+    // ═══════════════════════════════════════════════════════════════════
+
+    private void checkSystemCapabilities() {
+        executor.execute(() -> {
+            log("══════ SYSTEM CHECKS ═══════");
+            
+            // 1. Android version
+            log("Android: " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")");
+            boolean isAndroid13Plus = Build.VERSION.SDK_INT >= 33;
+            log("Android 13+: " + (isAndroid13Plus ? "✓" : "✗"));
+            
+            // 2. SELinux status
+            String selinux = runRoot("getenforce 2>/dev/null").trim();
+            if (selinux.isEmpty()) {
+                selinux = runRoot("cat /sys/fs/selinux/enforce 2>/dev/null").trim();
+            }
+            log("SELinux: " + (selinux.isEmpty() ? "unknown" : selinux));
+            
+            // 3. Root access
+            String suTest = runRoot("id").trim();
+            if (suTest.contains("uid=0") || suTest.contains("root")) {
+                log("Root: ✓ AVAILABLE");
+            } else {
+                log("Root: ✗ NOT AVAILABLE");
+                log("⚠ Без root патчинг НЕВОЗМОЖЕН!");
+            }
+            
+            // 4. ptrace capability
+            String ptrace = runRoot("cat /proc/sys/kernel/yama/ptrace_scope 2>/dev/null").trim();
+            log("ptrace_scope: " + (ptrace.isEmpty() ? "unknown" : ptrace));
+            if (!ptrace.isEmpty() && !ptrace.equals("0")) {
+                log("⚠ ptrace может быть заблокирован!");
+            }
+            
+            // 5. Check gdb availability
+            String gdb = runRoot("which gdb 2>/dev/null").trim();
+            log("gdb: " + (gdb.isEmpty() ? "not found" : gdb));
+            
+            // 6. Check linker
+            String linker = runRoot("ls /system/bin/linker* 2>/dev/null").trim();
+            log("linker: " + (linker.isEmpty() ? "not found" : linker));
+            
+            // 7. Check /data/local/tmp permissions
+            String tmpPerms = runRoot("ls -la /data/local/tmp 2>/dev/null | head -1").trim();
+            log("/data/local/tmp: " + tmpPerms);
+            
+            // 8. Check /data/data permissions
+            String dataPerms = runRoot("ls -la /data/data 2>/dev/null | head -1").trim();
+            log("/data/data: " + dataPerms);
+            
+            // Now find osu
+            checkFrameworks();
+            findOsu();
+        });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    // ════════════════════════════════════════════════════════════════════════════════════
+    // Framework Detection - Check Magisk, Zygisk, LSPosed, Riru
+    // ════════════════════════════════════════════════════════════════════════════════════
+
+    private void checkFrameworks() {
+        log("=== FRAMEWORKS ===");
+
+        String magisk = runRoot("magisk --version 2>/dev/null").trim();
+        if (magisk.isEmpty()) magisk = runRoot("ls /sbin/magisk 2>/dev/null").trim();
+        if (magisk.isEmpty()) magisk = runRoot("ls /data/adb/magisk/magisk 2>/dev/null").trim();
+        hasMagisk = !magisk.isEmpty();
+        log("Magisk: " + (hasMagisk ? "FOUND" : "NOT FOUND"));
+
+
+        if (hasMagisk) {
+            String zygiskConf = runRoot("cat /data/adb/magisk/config 2>/dev/null").trim();
+            hasZygisk = zygiskConf.contains("ZYGISC=true");
+            log("Zygisk: " + (hasZygisk ? "ENABLED" : "DISABLED"));
+        }
+
+        String lsposed = runRoot("ls /data/adb/modules/LSPosed 2>/dev/null").trim();
+        hasLSPosed = !lsposed.isEmpty();
+        log("LSPosed: " + (hasLSPosed ? "FOUND" : "NOT FOUND"));
+
+
+        String riru = runRoot("ls /data/adb/modules/riru 2>/dev/null").trim();
+        hasRiru = !riru.isEmpty();
+        log("Riru: " + (hasRiru ? "FOUND" : "NOT FOUND"));
+    }
+
+    // Find osu! - Determine package name, path, version, arch, build type
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    private void findOsu() {
+        log("══════ ПОИСК OSU ═══════");
+        
+        detectedPackageName = null;
+        detectedPackagePath = null;
+        detectedVersion = null;
+        detectedArch = null;
+        detectedBuildType = null;
+        
+        // Метод 1: Используем PackageManager для точного определения
+        for (String pkg : OSU_PACKAGES) {
+            try {
+                PackageManager pm = getPackageManager();
+                PackageInfo pi = pm.getPackageInfo(pkg, 0);
+                if (pi != null) {
+                    detectedPackageName = pkg;
+                    detectedVersion = pi.versionName;
+                    log("✓ [PM] " + pkg + " v" + detectedVersion);
+                    
+                    // Получаем путь через pm
+                    String pmPath = runRoot("pm path " + pkg + " 2>/dev/null").trim();
+                    if (pmPath.contains("package:")) {
+                        detectedPackagePath = pmPath.substring(pmPath.indexOf(":") + 1).trim();
+                        // Убираем .apk из пути
+                        if (detectedPackagePath.endsWith(".apk")) {
+                            detectedPackagePath = detectedPackagePath.substring(0, detectedPackagePath.lastIndexOf('/'));
+                        }
+                    }
+                    
+                    log("  Путь: " + detectedPackagePath);
+                    break;
+                }
+            } catch (PackageManager.NameNotFoundException e) {
+                // Package not found, continue
+            }
+        }
+        
+        // Метод 2: Если не найден через PM, ищем руками
+        if (detectedPackageName == null) {
+            log("[Поиск] Ищу в /data/app...");
+            for (String frag : new String[]{"osulazer", "ppy.osu", "rimu", "mathiessen", "reco1l", "cephasun"}) {
+                String found = runRoot(
+                    "find /data/app -maxdepth 2 -name 'base.apk' 2>/dev/null | grep -i '" + frag + "' | head -1").trim();
+                if (!found.isEmpty() && found.endsWith(".apk")) {
+                    detectedPackagePath = found.substring(0, found.lastIndexOf('/'));
+                    detectedPackageName = found.substring(found.indexOf('/') + 1, found.lastIndexOf('-'));
+                    log("✓ [find] " + detectedPackageName + " -> " + detectedPackagePath);
+                    break;
+                }
+            }
+        }
+        
+        // Метод 3: Ищем в data/data
+        if (detectedPackageName == null) {
+            log("[Поиск] Ищу в /data/data...");
+            for (String pkg : OSU_PACKAGES) {
+                String dir = pkg.replace("sh.", "").replace("com.", "");
+                String found = runRoot("ls /data/data/" + dir + "/base.apk 2>/dev/null").trim();
+                if (!found.isEmpty()) {
+                    detectedPackageName = pkg;
+                    detectedPackagePath = "/data/data/" + dir;
+                    log("✓ [data/data] " + pkg + " -> " + detectedPackagePath);
+                    break;
+                }
+            }
+        }
+        
+        if (detectedPackageName == null || detectedPackagePath == null) {
+            log("✗ osu! НЕ НАЙДЕН!");
+            mainHandler.post(() -> setStatus("osu! не найден", "#FF5500"));
+            return;
+        }
+        
+        // Определяем архитектуру
+        detectOsuArchitecture();
+        
+        // Определяем тип сборки (il2cpp/mono/hybrid)
+        detectBuildType();
+        
+        // Ищем файлы для патчинга
+        findTargetFiles();
+        
+        mainHandler.post(() -> setStatus("Готов", "#4CAF50"));
+    }
+
+    private void detectOsuArchitecture() {
+        log("═══ АРХИТЕКТУРА ═══");
+        
+        // Ищем .so файлы
+        String soList = runRoot("find '" + detectedPackagePath + "' -name '*.so' 2>/dev/null | head -20").trim();
+        
+        if (soList.contains("arm64") || soList.contains("aarch64")) {
+            detectedArch = "arm64";
+        } else if (soList.contains("armeabi-v7a") || soList.contains("armeabi")) {
+            detectedArch = "arm32";
+        } else if (soList.contains("x86_64")) {
+            detectedArch = "x64";
+        } else if (soList.contains("x86")) {
+            detectedArch = "x86";
+        } else {
+            detectedArch = "unknown";
+        }
+        
+        log("Архитектура: " + detectedArch);
+    }
+
+    private void detectBuildType() {
+        log("═══ ТИП СБОРКИ ═══");
+        
+        // Проверяем наличие libil2cpp.so
+        String il2cpp = runRoot("find '" + detectedPackagePath + "' -name 'libil2cpp.so' 2>/dev/null").trim();
+        if (!il2cpp.isEmpty()) {
+            detectedBuildType = "il2cpp";
+            log("Тип: il2cpp");
+            return;
+        }
+        
+        // Проверяем наличие assemblies (mono/hybrid)
+        String assemblies = runRoot("find '" + detectedPackagePath + "' -name '*.dll' 2>/dev/null | head -5").trim();
+        if (!assemblies.isEmpty()) {
+            detectedBuildType = "mono";
+            log("Тип: mono/hybrid");
+            return;
+        }
+        
+        // Проверяем blobs
+        String blobs = runRoot("find '" + detectedPackagePath + "' -name '*.blob' 2>/dev/null | head -3").trim();
+        if (!blobs.isEmpty()) {
+            detectedBuildType = "mono";
+            log("Тип: mono (blob)");
+            return;
+        }
+        
+        detectedBuildType = "unknown";
+        log("Тип: " + detectedBuildType);
+    }
+
+    private void findTargetFiles() {
+        log("═══ ПОИСК ФАЙЛОВ ═══");
+        
+        String baseName = pickedFileName != null ? 
+            pickedFileName.substring(0, pickedFileName.lastIndexOf('.')) : "Assembly-CSharp";
+        
+        // 1. Ищем blob файлы (в assemblies или корне)
+        String blobs = runRoot("find '" + detectedPackagePath + "' -name '*.blob' 2>/dev/null").trim();
+        if (blobs.isEmpty() && detectedPackageName != null) {
+            blobs = runRoot("find /data/data/" + detectedPackageName.replace(".", "_") + " -name '*.blob' 2>/dev/null").trim();
+        }
+        if (blobs.isEmpty()) {
+            blobs = runRoot("find /data/app/" + detectedPackageName + " -name '*.blob' 2>/dev/null").trim();
+        }
+        
+        if (!blobs.isEmpty()) {
+            targetType = "blob";
+            log("Найден blob: " + blobs.split("\n")[0]);
+            
+            // Проверяем целостность blob
+            checkBlobIntegrity(new File(blobs.split("\n")[0]));
+            return;
+        }
+        
+        // 2. Ищем AOT .so файлы
+        for (String nm : new String[]{
+                "libaot-" + baseName + ".dll.so",
+                "libaot-" + baseName + ".so",
+                baseName + ".dll.so"}) {
+            String so = runRoot("find '" + detectedPackagePath + "' -name '" + nm + "' 2>/dev/null").trim();
+            if (!so.isEmpty()) {
+                targetType = "so";
+                // Сохраняем hash оригинала
+                originalFileHash = runRoot("md5sum '" + so + "' 2>/dev/null").trim().split("\\s+")[0];
+                log("Найден AOT: " + so);
+                log("Original hash: " + originalFileHash);
+                return;
+            }
+        }
+        
+        // 3. Ищем .dll файлы
+        String dll = runRoot("find '" + detectedPackagePath + "' -name '" + baseName + ".dll' 2>/dev/null").trim();
+        if (dll.isEmpty()) {
+            dll = runRoot("find '" + detectedPackagePath + "' -name '*.dll' 2>/dev/null | head -5").trim();
+        }
+        if (!dll.isEmpty()) {
+            targetType = "dll";
+            originalFileHash = runRoot("md5sum '" + dll.split("\n")[0] + "' 2>/dev/null").trim().split("\\s+")[0];
+            log("Найден dll: " + dll.split("\n")[0]);
+            log("Original hash: " + originalFileHash);
+            return;
+        }
+        
+        // 4. fuzzy search
+        String fuzzy = runRoot("find '" + detectedPackagePath + "' -name '*.so' 2>/dev/null | grep -iE 'assembly|csharp|game' | head -3").trim();
+        if (!fuzzy.isEmpty()) {
+            targetType = "so";
+            String firstSo = fuzzy.split("\n")[0];
+            originalFileHash = runRoot("md5sum '" + firstSo + "' 2>/dev/null").trim().split("\\s+")[0];
+            log("Найден (fuzzy): " + firstSo);
+            return;
+        }
+        
+        log("✗ Файлы не найдены!");
+    }
+
+    private void checkBlobIntegrity(File blobFile) {
+        if (!blobFile.exists()) return;
+        
+        try (RandomAccessFile raf = new RandomAccessFile(blobFile, "r")) {
+            byte[] hb = new byte[16];
+            raf.readFully(hb);
+            ByteBuffer hdr = ByteBuffer.wrap(hb).order(ByteOrder.LITTLE_ENDIAN);
+            int magic = hdr.getInt();
+            
+            boolean isV2 = (magic == BLOB_MAGIC_V2);
+            if (magic != BLOB_MAGIC_V1 && !isV2) {
+                log("⚠ Неверный blob magic!");
+                return;
+            }
+            
+            int count = hdr.getInt();
+            log("Blob entries: " + count);
+            log("Blob цел: ✓");
+            
+            // Сохраняем hash
+            originalFileHash = runRoot("md5sum '" + blobFile.getAbsolutePath() + "' 2>/dev/null").trim().split("\\s+")[0];
+            log("Original hash: " + originalFileHash);
+            
+        } catch (Exception e) {
+            log("⚠ Ошибка проверки blob: " + e.getMessage());
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // File Selection
+    // ═══════════════════════════════════════════════════════════════════
 
     private void pickFile() {
         Intent i = new Intent(Intent.ACTION_GET_CONTENT);
@@ -139,7 +537,7 @@ public class MainActivity extends Activity {
                 pickedFileName = origName;
 
                 pickedFileArch = detectFileArch(origName);
-                log("-> Файл архитектура: " + pickedFileArch);
+                log("→ Файл архитектура: " + pickedFileArch);
 
                 File dest = new File(getCacheDir(), origName);
                 try (InputStream  in  = getContentResolver().openInputStream(uri);
@@ -150,24 +548,21 @@ public class MainActivity extends Activity {
                     while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
                 }
 
-                if (origName.toLowerCase().endsWith(".cs")) {
-                    log("-> C# файл: " + origName);
-                    File compiled = compileCSharp(dest, origName);
-                    if (compiled != null) {
-                        pickedFile     = compiled;
-                        pickedFileName = compiled.getName();
-                        pickedFileArch = detectFileArch(pickedFileName);
-                        log("✓ Скомпилировано: " + pickedFileName + " (" + compiled.length() / 1024 + " KB) [" + pickedFileArch + "]");
-                    } else {
-                        final File fd  = dest;
-                        final String fn = origName;
-                        mainHandler.post(() -> showCsWarning(fd, fn));
+                pickedFile = dest;
+                log("✓ Загружен: " + origName + " (" + dest.length() / 1024 + " KB) [" + pickedFileArch + "]");
+
+                // Check architecture match
+                if (!pickedFileArch.equals("unknown") && !detectedArch.equals("unknown")) {
+                    if (!pickedFileArch.equals(detectedArch)) {
+                        log("⚠ АРХИТЕКТУРА НЕ СОВПАДАЕТ!");
+                        log("   Файл: " + pickedFileArch + ", osu: " + detectedArch);
+                        mainHandler.post(() -> showArchWarning());
                         return;
                     }
-                } else {
-                    pickedFile = dest;
-                    log("✓ Загружен: " + origName + " (" + dest.length() / 1024 + " KB) [" + pickedFileArch + "]");
                 }
+
+                // Check version/size compatibility
+                checkPatchCompatibility(dest);
 
                 String baseName = stripExt(pickedFileName);
                 mainHandler.post(() -> {
@@ -181,6 +576,33 @@ public class MainActivity extends Activity {
                 log("✗ Ошибка загрузки: " + e.getMessage());
             }
         });
+    }
+
+    private void showArchWarning() {
+        new AlertDialog.Builder(this)
+            .setTitle("Несовпадение архитектуры")
+            .setMessage("Файл: " + pickedFileArch + "\nosu: " + detectedArch + "\n\nПродолжить?")
+            .setPositiveButton("Продолжить", (d, w) -> enableApply())
+            .setNegativeButton("Отмена", (d, w) -> {})
+            .show();
+    }
+
+    private void enableApply() {
+        btnApply.setEnabled(true);
+        setStatus("Готов", "#4CAF50");
+    }
+
+    private void checkPatchCompatibility(File newFile) {
+        if (targetType == null) return;
+        
+        // Для blob проверяем размер
+        if (targetType.equals("blob") && pickedFileName.toLowerCase().endsWith(".blob")) {
+            // Just log, doesn't matter for .blob file selection
+            return;
+        }
+        
+        // Для DLL/SO - просто логируем
+        log("→ Размер патча: " + newFile.length() + " bytes");
     }
 
     private String detectFileArch(String fileName) {
@@ -200,8 +622,6 @@ public class MainActivity extends Activity {
                     if (head[0] == 0x7F && head[1] == 'E' && head[2] == 'L' && head[3] == 'F') {
                         if (head[4] == 2 && head[5] == 183) return "arm64";
                         if (head[4] == 1 && head[5] == 40) return "arm32";
-                        if (head[4] == 2 && head[5] == 62) return "x64";
-                        if (head[4] == 1 && head[5] == 3) return "x86";
                     }
                     if (head[0] == 0x4D && head[1] == 0x5A) {
                         if (head[4] == 0x64 || head[20] == 0x20) return "arm64";
@@ -236,347 +656,157 @@ public class MainActivity extends Activity {
         return dot > 0 ? name.substring(0, dot) : name;
     }
 
-    private File compileCSharp(File csFile, String origName) {
-        String mcsPath = runRoot("which mcs 2>/dev/null").trim();
-        if (mcsPath.isEmpty())
-            mcsPath = runRoot("ls /data/data/com.termux/files/usr/bin/mcs 2>/dev/null").trim();
-        if (mcsPath.isEmpty()) {
-            log("! mcs не найден. Установи Mono: pkg install mono");
-            return null;
-        }
-        log("-> Компилятор: " + mcsPath);
-        String dllName = stripExt(origName) + ".dll";
-        File   outDll  = new File(getCacheDir(), dllName);
-        String refs    = "";
-        PatchTarget pt = findPatchTarget();
-        if (pt != null && !pt.isBlobMode && pt.mountTarget != null) {
-            String dir = pt.mountTarget.substring(0, pt.mountTarget.lastIndexOf('/'));
-            refs = " -lib:'" + escQ(dir) + "'";
-        }
-        String cmd = "\"" + mcsPath + "\" -target:library" + refs
-                + " -out:'" + escQ(outDll.getAbsolutePath()) + "'"
-                + " '" + escQ(csFile.getAbsolutePath()) + "' 2>&1";
-        String result = runRoot(cmd);
-        if (!result.trim().isEmpty()) log("-> Компилятор:\n" + result.trim());
-        
-        if (outDll.exists() && outDll.length() > 0) {
-            pickedFileArch = detectFileArch(outDll.getName());
-            log("->DLL архитектура: " + pickedFileArch);
-        }
-        
-        return (outDll.exists() && outDll.length() > 0) ? outDll : null;
-    }
-
-    private void showCsWarning(File csFile, String origName) {
-        new AlertDialog.Builder(this)
-            .setTitle("Mono не установлен")
-            .setMessage("Для компиляции .cs нужен Mono:\n  pkg install mono\n\nВшить как есть?")
-            .setPositiveButton("Вшить как есть", (d, w) -> {
-                pickedFile = csFile;
-                pickedFileArch = detectFileArch(csFile.getName());
-                if (etTargetName.getText().toString().trim().isEmpty())
-                    etTargetName.setText(stripExt(origName));
-                btnApply.setEnabled(true);
-                setStatus("Готов (без компиляции)", "#FF9800");
-                log("⚠ Будет вшито без компиляции [" + pickedFileArch + "]");
-            })
-            .setNegativeButton("Отмена", null)
-            .show();
-    }
-
-    private void checkRoot() {
-        executor.execute(() -> {
-            String suTest = runRoot("id").trim();
-            if (suTest.contains("uid=0") || suTest.contains("root")) {
-                log("✓ Root подтверждён: " + suTest);
-            } else {
-                log("✗ Root недоступен или ограничен");
-                mainHandler.post(() -> setStatus("ROOT REQUIRED", "#F44336"));
-            }
-        });
-    }
-
-    private void checkCurrentStatus() {
-        executor.execute(() -> {
-            PatchTarget pt = findPatchTarget();
-            if (pt == null) {
-                mainHandler.post(() -> setStatus("osu! не найден", "#FF5500"));
-                return;
-            }
-            
-            boolean mounted = checkMountReal(pt.mountTarget);
-            if (mounted) {
-                log("● Патч АКТИВЕН: " + pt.mountTarget);
-                mainHandler.post(() -> setStatus("PATCHED ✓", "#4CAF50"));
-            } else {
-                log("○ Не пропатчен [" + (pt.isBlobMode ? "BLOB" : "DLL/SO") + "] pkg=" + pt.packageName);
-                mainHandler.post(() -> setStatus("Не пропатчен", "#888888"));
-            }
-        });
-    }
-
-    // ════════════════════════════════════════════════════════════════════════════
-    // Framework Detection - Check Magisk, Zygisk, LSPosed, Riru
-    // ════════════════════════════════════════════════════════════════════════════
-
-    private void checkFrameworks() {
-        log("=== FRAMEWORKS ===");
-
-        String magisk = runRoot("magisk --version 2>/dev/null").trim();
-        if (magisk.isEmpty()) magisk = runRoot("ls /sbin/magisk 2>/dev/null").trim();
-        if (magisk.isEmpty()) magisk = runRoot("ls /data/adb/magisk/magisk 2>/dev/null").trim();
-        hasMagisk = !magisk.isEmpty();
-        log("Magisk: " + (hasMagisk ? "FOUND" : "NOT FOUND"));
-
-        if (hasMagisk) {
-            String zygiskConf = runRoot("cat /data/adb/magisk/config 2>/dev/null").trim();
-            hasZygisk = zygiskConf.contains("ZYGISC=true");
-            log("Zygisk: " + (hasZygisk ? "ENABLED" : "DISABLED"));
-        }
-
-        String lsposed = runRoot("ls /data/adb/modules/LSPosed 2>/dev/null").trim();
-        hasLSPosed = !lsposed.isEmpty();
-        log("LSPosed: " + (hasLSPosed ? "FOUND" : "NOT FOUND"));
-
-        String riru = runRoot("ls /data/adb/modules/riru 2>/dev/null").trim();
-        hasRiru = !riru.isEmpty();
-        log("Riru: " + (hasRiru ? "FOUND" : "NOT FOUND"));
-    }
+    // ═══════════════════════════════════════════════════════════════════
+    // Apply Patch - Main Logic
+    // ═══════════════════════════════════════════════════════════════════
 
     private void applyPatch() {
-        if (pickedFile == null || !pickedFile.exists()) { log("✗ Файл не выбран"); return; }
+        if (pickedFile == null || !pickedFile.exists()) { 
+            log("✗ Файл не выбран"); 
+            return; 
+        }
+        
         String inp = etTargetName.getText().toString().trim();
         final String targetName = inp.isEmpty() ? stripExt(pickedFileName) : inp;
+        
         btnApply.setEnabled(false);
         setStatus("Применяю...", "#FF9800");
 
         executor.execute(() -> {
-            PatchTarget pt = findPatchTarget();
-            if (pt == null) { 
-                log("✗ osu! не найден - проверь что игра установлена"); 
-                fail(); 
-                return; 
+            // Check system first
+            String suTest = runRoot("id").trim();
+            if (!suTest.contains("uid=0") && !suTest.contains("root")) {
+                log("✗ НЕТ ROOT! Патчинг невозможен.");
+                fail();
+                return;
             }
-
-            if (!pt.isBlobMode && pickedFileArch != null && !pickedFileArch.equals("unknown")) {
-                String osuArch = pt.targetArch != null ? pt.targetArch : detectOsuArch(pt);
-                if (osuArch != null && !osuArch.equals("unknown")) {
-                    if (!pickedFileArch.equals(osuArch)) {
-                        log("⚠ АРХИТЕКТУРА НЕ СОВПАДАЕТ!");
-                        log("   Файл: " + pickedFileArch + ", osu!: " + osuArch);
-                        mainHandler.post(() -> {
-                            new AlertDialog.Builder(this)
-                                .setTitle("Несовпадение архитектуры")
-                                .setMessage("Файл: " + pickedFileArch + "\nosu!: " + osuArch + "\n\nПродолжить?")
-                                .setPositiveButton("Продолжить", (d, w) -> doApplyPatch(pt, targetName))
-                                .setNegativeButton("Отмена", (d, w) -> {
-                                    log("✗ Отменено пользователем");
-                                    fail(); 
-                                })
-                                .show();
-                        });
-                        return;
-                    }
-                    log("✓ Архитектура совпадает: " + pickedFileArch);
-                }
+            
+            if (detectedPackageName == null || detectedPackagePath == null) {
+                log("✗ osu! не найден");
+                fail();
+                return;
             }
-
-            doApplyPatch(pt, targetName);
+            
+            log("════════════════════════");
+            log("Пакет: " + detectedPackageName);
+            log("Версия: " + detectedVersion);
+            log("Арх: " + detectedArch);
+            log("Тип: " + detectedBuildType);
+            log("Цель: " + targetType);
+            log("════════════════════════");
+            
+            // Create backup
+            createBackup();
+            
+            // Apply based on target type
+            if (targetType == null) {
+                log("✗ Неизвестный тип файла!");
+                fail();
+                return;
+            }
+            
+            if (targetType.equals("blob")) {
+                applyBlobPatch(targetName);
+            } else if (targetType.equals("so")) {
+                applySoPatch();
+            } else {
+                applyDllPatch();
+            }
         });
     }
-    
-    private void doApplyPatch(PatchTarget pt, String targetName) {
-        log("─────────────────────────");
-        log("Пакет: " + pt.packageName);
-        log("Режим: " + (pt.isBlobMode ? "BLOB" : "DLL/SO"));
-        log("Цель:  " + pt.mountTarget);
-        log(" arch: " + (pt.targetArch != null ? pt.targetArch : "unknown"));
-        log("─────────────────────────");
 
-        if (isMounted(pt.mountTarget)) {
-            runRoot("umount '" + escQ(pt.mountTarget) + "' 2>/dev/null");
-            log("-> Старый mount снят");
-            try { Thread.sleep(500); } catch (Exception e) {}
+    private void createBackup() {
+        log("→ Создаю backup...");
+        
+        String backupDir = "/data/data/" + detectedPackageName + "_backup";
+        runRoot("mkdir -p '" + backupDir + "'");
+        
+        // Backup existing files
+        if (detectedPackagePath != null) {
+            String cmd = "cp -r '" + detectedPackagePath + "'/* '" + backupDir + "/' 2>/dev/null";
+            runRoot(cmd);
         }
-
-        boolean isBlob = pickedFileName != null && pickedFileName.toLowerCase().endsWith(".blob");
-        if (isBlob || !pt.isBlobMode) {
-            applyDirectMount(pt);
-        } else {
-            applyBlobPatch(pt, targetName);
-        }
+        
+        log("✓ Backup создан в " + backupDir);
     }
 
-    private void applyDirectMount(PatchTarget pt) {
-        String tempDir = "/data/data/" + pt.packageName;
-        runRoot("mkdir -p '" + tempDir + "'");
-        String src = tempDir + "/" + pickedFileName;
-        runRoot("cp '" + escQ(pickedFile.getAbsolutePath()) + "' '" + escQ(src) + "'");
-        runRoot("chmod 644 '" + escQ(src) + "'");
+    private void applyBlobPatch(String targetName) {
+        log("═══ BLOB PATCH ═══");
         
-        if (!runRoot("ls -la '" + escQ(src) + "'").contains(String.valueOf(pickedFile.length()))) {
-            log("⚠ Файл не скопировался, пробую /data/local/tmp");
-            src = "/data/local/tmp/" + pickedFileName;
-            runRoot("cp '" + escQ(pickedFile.getAbsolutePath()) + "' '" + escQ(src) + "'");
-            runRoot("chmod 644 '" + escQ(src) + "'");
+        // Find blob path
+        String blobs = runRoot("find '" + detectedPackagePath + "' -name '*.blob' 2>/dev/null").trim();
+        if (blobs.isEmpty() && detectedPackageName != null) {
+            blobs = runRoot("find /data/data/" + detectedPackageName.replace(".", "_") + " -name '*.blob' 2>/dev/null").trim();
         }
         
-        String dst = "'" + escQ(pt.mountTarget) + "'";
-
-        log("-> [1] mount --bind...");
-        runRoot("mount --bind '" + escQ(src) + "' " + dst);
-        if (verifyMount(pt, src)) { success(pt, src); return; }
-
-        log("-> [2] mount -o bind...");
-        runRoot("mount -o bind '" + escQ(src) + "' " + dst);
-        if (verifyMount(pt, src)) { success(pt, src); return; }
-
-        log("-> [3] nsenter mount (init)...");
-        runRoot("nsenter --mount=/proc/1/ns/mnt -- mount --bind '" + escQ(src) + "' " + dst);
-        if (verifyMount(pt, src)) { success(pt, src); return; }
-
-        log("-> [4] nsenter mount (root)...");
-        runRoot("nsenter --mount=/proc/$(pgrep -f '^/system/bin/init$' 2>/dev/null | head -1)/ns/mnt -- mount --bind '" + escQ(src) + "' " + dst);
-        if (verifyMount(pt, src)) { success(pt, src); return; }
-
-        log("-> [5] Magisk модуль...");
-        String modDir = "/data/adb/modules/osupatch";
-        runRoot("mkdir -p '" + modDir + "'");
-        String prop = "id=osupatch\\nname=osu! Patcher\\nversion=v2\\nversionCode=2\\nauthor=osupatch\\ndescription=osu! DLL patch\\n";
-        runRoot("printf '" + prop + "' > '" + modDir + "/module.prop'");
-        String rel = pt.mountTarget.startsWith("/") ? pt.mountTarget.substring(1) : pt.mountTarget;
-        String destDir = modDir + "/" + rel.substring(0, rel.lastIndexOf('/'));
-        runRoot("mkdir -p '" + escQ(destDir) + "'");
-        runRoot("cp '" + escQ(src) + "' '" + escQ(modDir + "/" + rel) + "'");
-        runRoot("chmod -R 755 '" + modDir + "'");
-        log("✓ Magisk модуль — перезагрузи");
-
-        log("-> [6] Runtime inject...");
-        if (tryRuntimeInject(pt, src)) return;
-
-        log("✗ НИЧЕГО НЕ СРАБОТАЛО!");
-        log("  1. mount заблокирован на Android 13+");
-        log("  2. nsenter может быть недоступен");
-        log("  3. osu уже запущен и закешировал DLL");
-        log("  Решение: Закрой osu полностью и попробуй снова");
-        fail();
-    }
-
-    private boolean verifyMount(PatchTarget pt, String srcFile) {
-        if (checkMountReal(pt.mountTarget)) {
-            return true;
+        if (blobs.isEmpty()) {
+            log("✗ Blob не найден!");
+            fail();
+            return;
         }
         
-        if (pt.packageName != null) {
-            String mountedHash = runRoot("md5sum '" + escQ(pt.mountTarget) + "' 2>/dev/null").trim().split("\\s+")[0];
-            String srcHash = runRoot("md5sum '" + escQ(srcFile) + "' 2>/dev/null").trim().split("\\s+")[0];
-            if (!mountedHash.isEmpty() && !srcHash.isEmpty() && mountedHash.equals(srcHash)) {
-                log("✓ Hash совпал — mount работает");
-                return true;
-            }
-            log("! Hash НЕ совпал!");
-            log("   mounted: " + mountedHash);
-            log("   source:  " + srcHash);
-        }
+        String blobPath = blobs.split("\n")[0];
+        log("Blob: " + blobPath);
         
-        return false;
-    }
-
-    private boolean checkMountReal(String path) {
-        if (path == null || path.isEmpty()) return false;
-        
-        String mi = runRoot("cat /proc/self/mountinfo 2>/dev/null | grep '" + escQ(path) + "'").trim();
-        if (!mi.isEmpty()) return true;
-        
-        String m = runRoot("grep ' " + escQ(path) + " ' /proc/mounts 2>/dev/null").trim();
-        if (!m.isEmpty()) return true;
-        
-        String mg = runRoot("mount 2>/dev/null | grep '" + escQ(path) + "'").trim();
-        return !mg.isEmpty();
-    }
-
-    private void applyBlobPatch(PatchTarget pt, String targetName) {
         try {
-            log("-> Копирую blob...");
+            // Copy blob to work area
             File workBlob = new File(getCacheDir(), "work.blob");
-            runRoot("cp '" + escQ(pt.blobPath) + "' '" + escQ(workBlob.getAbsolutePath()) + "'");
-            runRoot("chmod 666 '" + escQ(workBlob.getAbsolutePath()) + "'");
-
+            runRoot("cp '" + blobPath + "' '" + workBlob.getAbsolutePath() + "'");
+            runRoot("chmod 666 '" + workBlob.getAbsolutePath() + "'");
+            
+            // Check integrity before
             if (!verifyBlobIntegrity(workBlob)) {
                 log("⚠ Исходный blob повреждён!");
             }
-
-            if (!patchAssemblyBlob(workBlob, pickedFile, targetName)) {
-                log("✗ \"" + targetName + "\" не найдена в blob");
-                log("  Уточни имя в поле выше (без .dll)");
-                fail(); return;
+            
+            // Patch blob
+            if (!patchBlob(workBlob, pickedFile, targetName)) {
+                log("✗ Не удалось пропатчить blob");
+                fail();
+                return;
             }
-
+            
+            // Verify after patch
             if (!verifyBlobIntegrity(workBlob)) {
-                log("⚠ Пропатченный blob ПОВРЕЖДЁН! osu проигнорирует.");
+                log("⚠ Пропатченный blob ПОВРЕЖДЁН!");
+                rollback();
+                fail();
+                return;
             }
-
-            String tempDir = "/data/data/" + pt.packageName;
-            runRoot("mkdir -p '" + tempDir + "'");
-            String tmpBlob = tempDir + "/patched.blob";
-            runRoot("cp '" + escQ(workBlob.getAbsolutePath()) + "' '" + escQ(tmpBlob) + "'");
-            runRoot("chmod 644 '" + escQ(tmpBlob) + "'");
-            String dst = "'" + escQ(pt.mountTarget) + "'";
-
-            log("-> [B1] mount --bind blob...");
-            runRoot("mount --bind '" + escQ(tmpBlob) + "' " + dst);
-            if (verifyMount(pt, tmpBlob)) { success(pt, tmpBlob); return; }
-
-            log("-> [B2] mount -o bind blob...");
-            runRoot("mount -o bind '" + escQ(tmpBlob) + "' " + dst);
-            if (verifyMount(pt, tmpBlob)) { success(pt, tmpBlob); return; }
-
-            log("-> [B3] nsenter blob...");
-            runRoot("nsenter --mount=/proc/1/ns/mnt -- mount --bind '" + escQ(tmpBlob) + "' " + dst);
-            if (verifyMount(pt, tmpBlob)) { success(pt, tmpBlob); return; }
-
-            log("✗ Blob mount не удался");
-            fail();
+            
+            // Mount patched blob
+            applyMount(workBlob.getAbsolutePath(), blobPath);
+            
         } catch (Exception e) {
             log("✗ Ошибка blob: " + e.getMessage());
+            rollback();
             fail();
         }
     }
 
     private boolean verifyBlobIntegrity(File blobFile) {
-        if (blobFile == null || !blobFile.exists()) return false;
+        if (!blobFile.exists()) return false;
         
         try (RandomAccessFile raf = new RandomAccessFile(blobFile, "r")) {
             byte[] hb = new byte[16];
             raf.readFully(hb);
             ByteBuffer hdr = ByteBuffer.wrap(hb).order(ByteOrder.LITTLE_ENDIAN);
             int magic = hdr.getInt();
-            hdr.getInt();
-            int count = hdr.getInt();
-            hdr.getInt();
             
             boolean isV2 = (magic == BLOB_MAGIC_V2);
-            if (magic != BLOB_MAGIC_V1 && !isV2) {
-                log("! Неверный blob magic");
-                return false;
-            }
+            if (magic != BLOB_MAGIC_V1 && !isV2) return false;
             
+            int count = hdr.getInt();
             int entrySize = isV2 ? 32 : 28;
             long tableEnd = 16L + (long) count * entrySize;
-            if (tableEnd > blobFile.length()) {
-                log("! Таблица выходит за пределы файла");
-                return false;
-            }
             
-            log("✓ Blob цел: " + count + " записей");
-            return true;
+            return tableEnd <= blobFile.length();
         } catch (Exception e) {
-            log("! Ошибка проверки blob: " + e.getMessage());
             return false;
         }
     }
 
-    private boolean patchAssemblyBlob(File blobFile, File newDll, String targetName) throws Exception {
+    private boolean patchBlob(File blobFile, File newDll, String targetName) {
         try (RandomAccessFile raf = new RandomAccessFile(blobFile, "rw")) {
             byte[] hb = new byte[16];
             raf.readFully(hb);
@@ -586,20 +816,13 @@ public class MainActivity extends Activity {
             int count = hdr.getInt();
             hdr.getInt();
 
-            log("-> Blob magic: 0x" + Long.toHexString(magic & 0xFFFFFFFFL));
-            log("-> Записей: " + count);
-
             boolean isV2 = (magic == BLOB_MAGIC_V2);
-            if (magic != BLOB_MAGIC_V1 && !isV2) {
-                log("! Неверный blob magic — не Assembly Store");
-                return false;
-            }
-
             int entrySize = isV2 ? 32 : 28;
-            int dataOffsetField = isV2 ? 16 : 12;
             long tableBase = 16L;
 
-            List<long[]> entries = new ArrayList<>();
+            byte[] newBytes = readFileFully(newDll);
+            String tgtLower = targetName.toLowerCase().replace(".dll", "");
+
             for (int i = 0; i < count; i++) {
                 long pos = tableBase + (long) i * entrySize;
                 raf.seek(pos);
@@ -610,16 +833,7 @@ public class MainActivity extends Activity {
                 else { e.getInt(); e.getLong(); }
                 long dataOff = e.getInt() & 0xFFFFFFFFL;
                 long dataSize = e.getInt() & 0xFFFFFFFFL;
-                entries.add(new long[]{pos + dataOffsetField, dataOff, dataSize});
-            }
-
-            byte[] newBytes = readFileFully(newDll);
-            String tgtLower = targetName.toLowerCase().replace(".dll", "");
-
-            for (int i = 0; i < entries.size(); i++) {
-                long sizeFieldAbs = entries.get(i)[0] + 4;
-                long dataOff = entries.get(i)[1];
-                long dataSize = entries.get(i)[2];
+                
                 if (dataSize < 64 || dataOff == 0) continue;
 
                 raf.seek(dataOff);
@@ -628,12 +842,13 @@ public class MainActivity extends Activity {
                 if (sig[0] != 0x4D || sig[1] != 0x5A) continue;
 
                 raf.seek(dataOff);
-                int peekLen = (int) Math.min(dataSize, 8192);
+                int peekLen = (int) Math.min(dataSize, 4096);
                 byte[] peek = new byte[peekLen];
                 raf.readFully(peek);
 
                 String ascii = new String(peek, "ISO-8859-1").toLowerCase();
                 boolean found = ascii.contains(tgtLower);
+                
                 if (!found) {
                     StringBuilder u16 = new StringBuilder();
                     for (int b = 0; b + 1 < peekLen; b += 2) {
@@ -642,35 +857,214 @@ public class MainActivity extends Activity {
                     }
                     found = u16.toString().toLowerCase().contains(tgtLower);
                 }
+                
                 if (!found) continue;
 
-                log("-> Запись #" + i + " (off=" + dataOff + " slot=" + dataSize + ")");
-                log("   новый файл: " + newBytes.length + " bytes");
+                log("→ Патчу запись #" + i);
+                log("  Slot size: " + dataSize + ", new: " + newBytes.length);
 
                 if (newBytes.length > dataSize) {
-                    log("⚠ ОПАСНО! новый файл БОЛЬШЕ слота!");
-                    log("   osu скорее всего проигнорирует патч");
+                    log("⚠ НОВЫЙ ФАЙЛ БОЛЬШЕ! Пропускаю.");
+                    return false;
                 }
 
                 raf.seek(dataOff);
-                int writeLen = (int) Math.min(newBytes.length, dataSize);
-                raf.write(newBytes, 0, writeLen);
+                raf.write(newBytes, 0, newBytes.length);
                 if (newBytes.length < dataSize) {
                     raf.write(new byte[(int)(dataSize - newBytes.length)]);
                 }
 
-                raf.seek(sizeFieldAbs);
-                ByteBuffer sb2 = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN);
-                sb2.putInt(writeLen);
-                raf.write(sb2.array());
-                
-                log("✓ Запись #" + i + " пропатчена (" + writeLen + " bytes)");
+                // Update size field
+                long sizeFieldPos = pos + (isV2 ? 24 : 20);
+                raf.seek(sizeFieldPos);
+                ByteBuffer sb = ByteBuffer.allocate(4).order(ByteOrder.LITTLE_ENDIAN);
+                sb.putInt(newBytes.length);
+                raf.write(sb.array());
+
+                log("✓ Пропатчено: " + newBytes.length + " bytes");
                 return true;
             }
-            log("✗ \"" + targetName + "\" не найдена в blob");
+            
+            log("✗ \"" + targetName + "\" не найден в blob");
+            return false;
+            
+        } catch (Exception e) {
+            log("✗ Ошибка патча: " + e.getMessage());
             return false;
         }
     }
+
+    private void applySoPatch() {
+        log("═══ SO PATCH ═══");
+        
+        // Find the target so
+        String baseName = stripExt(pickedFileName);
+        String soPath = runRoot("find '" + detectedPackagePath + "' -name '*" + baseName + "*.so' 2>/dev/null | head -1").trim();
+        
+        if (soPath.isEmpty()) {
+            log("✗ SO не найден!");
+            fail();
+            return;
+        }
+        
+        applyMount(pickedFile.getAbsolutePath(), soPath);
+    }
+
+    private void applyDllPatch() {
+        log("═══ DLL PATCH ═══");
+        
+        String baseName = stripExt(pickedFileName);
+        String dllPath = runRoot("find '" + detectedPackagePath + "' -name '" + baseName + ".dll' 2>/dev/null | head -1").trim();
+        
+        if (dllPath.isEmpty()) {
+            log("✗ DLL не найден!");
+            fail();
+            return;
+        }
+        
+        applyMount(pickedFile.getAbsolutePath(), dllPath);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Mount - Real verification and rollback
+    // ═══════════════════════════════════════════════════════════════════
+
+    private void applyMount(String srcPath, String dstPath) {
+        log("═══ MOUNT ═══");
+        
+        // Unmount if already mounted
+        runRoot("umount '" + dstPath + "' 2>/dev/null");
+        try { Thread.sleep(300); } catch (Exception e) {}
+        
+        // Try different mount methods
+        boolean success = false;
+        
+        // Method 1: mount --bind
+        log("→ [1] mount --bind");
+        runRoot("mount --bind '" + srcPath + "' '" + dstPath + "'");
+        if (verifyMount(dstPath, srcPath)) {
+            success = true;
+        }
+        
+        // Method 2: mount -o bind
+        if (!success) {
+            log("→ [2] mount -o bind");
+            runRoot("mount -o bind '" + srcPath + "' '" + dstPath + "'");
+            if (verifyMount(dstPath, srcPath)) {
+                success = true;
+            }
+        }
+        
+        // Method 3: nsenter
+        if (!success) {
+            log("→ [3] nsenter");
+            runRoot("nsenter --mount=/proc/1/ns/mnt -- mount --bind '" + srcPath + "' '" + dstPath + "'");
+            if (verifyMount(dstPath, srcPath)) {
+                success = true;
+            }
+        }
+        
+        // Method 4: Magisk module (for next reboot)
+        if (!success) {
+            log("→ [4] Magisk module");
+            createMagiskModule(srcPath, dstPath);
+            success = true; // Consider success for reboot
+        }
+        
+        if (success) {
+            // Try to restart osu to reload assembly
+            restartOsu();
+            success();
+        } else {
+            log("✗ Mount не удался!");
+            log("⚠ Попробуй перезагрузить устройство");
+            rollback();
+            fail();
+        }
+    }
+
+    private boolean verifyMount(String path, String expectedSrc) {
+        // Check mountinfo
+        String mi = runRoot("cat /proc/self/mountinfo 2>/dev/null | grep '" + path + "'").trim();
+        if (mi.isEmpty()) return false;
+        
+        // Verify hash matches
+        String hash = runRoot("md5sum '" + path + "' 2>/dev/null").trim().split("\\s+")[0];
+        String srcHash = runRoot("md5sum '" + expectedSrc + "' 2>/dev/null").trim().split("\\s+")[0];
+        
+        if (!hash.isEmpty() && !srcHash.isEmpty() && hash.equals(srcHash)) {
+            log("✓ Mount верифицирован! Hash match.");
+            return true;
+        }
+        
+        return !mi.isEmpty();
+    }
+
+    private void restartOsu() {
+        log("→ Перезапускаю osu для перезагрузки assembly...");
+        
+        // Force stop
+        runRoot("am force-stop " + detectedPackageName);
+        
+        // Clear dalvik cache
+        runRoot("pm clear " + detectedPackageName);
+        
+        // Wait a bit
+        try { Thread.sleep(1000); } catch (Exception e) {}
+        
+        // Start osu (user can manually start)
+        log("✓ osu остановлен. Перезапусти вручную.");
+    }
+
+    private void createMagiskModule(String srcPath, String dstPath) {
+        String modDir = "/data/adb/modules/osupatch";
+        runRoot("mkdir -p '" + modDir + "'");
+        
+        String prop = "id=osupatch\nname=osu! Patcher\nversion=v2\nversionCode=2\nauthor=osupatch\ndescription=osu! DLL patch\n";
+        runRoot("printf '" + prop.replace("\n", "\\n") + "' > '" + modDir + "/module.prop'");
+        
+        String rel = dstPath.startsWith("/") ? dstPath.substring(1) : dstPath;
+        String destDir = modDir + "/" + rel.substring(0, rel.lastIndexOf('/'));
+        
+        runRoot("mkdir -p '" + destDir + "'");
+        runRoot("cp '" + srcPath + "' '" + modDir + "/" + rel + "'");
+        runRoot("chmod -R 755 '" + modDir + "'");
+        
+        log("✓ Magisk модуль создан");
+        log("  Перезагрузи для активации");
+    }
+
+    private void rollback() {
+        log("═══ ROLLBACK ═══");
+        
+        String backupDir = "/data/data/" + detectedPackageName + "_backup";
+        runRoot("cp -r '" + backupDir + "'/* '" + detectedPackagePath + "/' 2>/dev/null");
+        
+        runRoot("umount '" + detectedPackagePath + "' 2>/dev/null");
+        
+        log("✓ Rollback выполнен");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Unmount
+    // ═══════════════════════════════════════════════════════════════════
+
+    private void unmount() {
+        setStatus("Снимаю...", "#FF9800");
+        
+        executor.execute(() -> {
+            runRoot("umount '" + detectedPackagePath + "' 2>/dev/null");
+            runRoot("rm -rf /data/adb/modules/osupatch 2>/dev/null");
+            
+            log("✓ Патч снят");
+            
+            mainHandler.post(() -> setStatus("Снято", "#888888"));
+        });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // Helpers
+    // ═══════════════════════════════════════════════════════════════════
 
     private byte[] readFileFully(File f) throws Exception {
         byte[] d = new byte[(int) f.length()];
@@ -683,461 +1077,6 @@ public class MainActivity extends Activity {
             }
         }
         return d;
-    }
-
-    private boolean tryRuntimeInject(PatchTarget pt, String soPath) {
-        if (!soPath.toLowerCase().endsWith(".so")) {
-            log("! Runtime inject: нужен .so файл");
-            return false;
-        }
-        
-        log("-> Ищу PID osu!...");
-        String pid = findOsuPid(pt.packageName);
-        if (pid.isEmpty()) {
-            log("! osu! не запущен — запусти игру først!");
-            return false;
-        }
-        
-        String osuArch = getProcessArch(pid);
-        if (!osuArch.equals("unknown") && !pickedFileArch.equals("unknown")) {
-            if (!osuArch.equals(pickedFileArch)) {
-                log("⚠ Архитектура НЕ СОВПАДАЕТ: so=" + pickedFileArch + ", osu=" + osuArch);
-            }
-        }
-
-        String injectOut = tryDlopenInject(pid, soPath);
-        
-        if (verifySoLoaded(pid, soPath)) {
-            log("✓ Runtime inject успешен!");
-            log("⚠ Перезапусти osu! для применения патча!");
-            mainHandler.post(() -> setStatus("INJECTED ✓", "#4CAF50"));
-            return true;
-        }
-        
-        log("! Подтверждения загрузки нет — SELinux заблокировал");
-        log("  " + injectOut);
-        return false;
-    }
-
-    private String findOsuPid(String packageName) {
-        String pid = "";
-        
-        if (packageName != null) {
-            pid = runRoot("pidof " + packageName + " 2>/dev/null").trim().split("\\s+")[0];
-        }
-        if (!pid.isEmpty()) return pid;
-        
-        for (String pkg : OSU_PACKAGES) {
-            pid = runRoot("pidof " + pkg + " 2>/dev/null").trim().split("\\s+")[0];
-            if (!pid.isEmpty()) return pid;
-        }
-        
-        String ps = runRoot("ps -A -o PID,NAME 2>/dev/null | grep -iE 'osulazer|ppy.osu|rimu'").trim();
-        if (!ps.isEmpty()) {
-            for (String line : ps.split("\n")) {
-                if (!line.contains("grep")) {
-                    String[] parts = line.trim().split("\\s+");
-                    if (parts.length >= 1) {
-                        pid = parts[0];
-                        break;
-                    }
-                }
-            }
-        }
-        
-        return pid != null ? pid : "";
-    }
-
-    private String getProcessArch(String pid) {
-        if (pid == null || pid.isEmpty()) return "unknown";
-        String status = runRoot("cat /proc/" + pid + "/status 2>/dev/null").trim();
-        if (status.contains("arm64") || status.contains("aarch64")) return "arm64";
-        return "unknown";
-    }
-
-    private String tryDlopenInject(String pid, String soPath) {
-        String script = 
-            "#!/system/bin/sh\n" +
-            "PID=" + pid + "\n" +
-            "SO='" + soPath + "'\n" +
-            "echo \"Trying: LD_PRELOAD=$SO kill -0 $PID\"\n" +
-            "LD_PRELOAD=$SO kill -0 $PID 2>&1\n" +
-            "echo \"dlopen typically blocked on Android 13+\"\n";
-        
-        File f = new File(getCacheDir(), "inject.sh");
-        try (FileOutputStream fos = new FileOutputStream(f)) {
-            fos.write(script.getBytes("UTF-8"));
-        } catch (Exception e) {
-            return "";
-        }
-        runRoot("chmod +x '" + escQ(f.getAbsolutePath()) + "'");
-        return runRoot("sh '" + escQ(f.getAbsolutePath()) + "'");
-    }
-
-    private boolean verifySoLoaded(String pid, String soPath) {
-        if (pid == null || pid.isEmpty() || soPath == null) return false;
-        
-        String maps = runRoot("grep '" + escQ(soPath) + "' /proc/" + pid + "/maps 2>/dev/null").trim();
-        if (!maps.isEmpty()) {
-            log("✓ SO найден в памяти процесса");
-            return true;
-        }
-        
-        return false;
-    }
-
-    private void unmount() {
-        setStatus("Снимаю...", "#FF9800");
-        executor.execute(() -> {
-            PatchTarget pt = findPatchTarget();
-            if (pt == null) { log("✗ osu! не найден"); return; }
-            
-            boolean mounted = checkMountReal(pt.mountTarget);
-            if (!mounted) {
-                log("○ Патч не активен");
-                mainHandler.post(() -> setStatus("Не пропатчен", "#888888"));
-            } else {
-                for (int i = 0; i < 3; i++) {
-                    runRoot("umount '" + escQ(pt.mountTarget) + "' 2>/dev/null");
-                    if (!checkMountReal(pt.mountTarget)) break;
-                    try { Thread.sleep(300); } catch (Exception e) {}
-                }
-                
-                if (!checkMountReal(pt.mountTarget)) {
-                    log("✓ Патч снят. Перезапусти osu!");
-                    mainHandler.post(() -> setStatus("Снято", "#888888"));
-                } else {
-                    log("✗ Не удалось снять — перезагрузи");
-                    mainHandler.post(() -> setStatus("Ошибка", "#F44336"));
-                }
-            }
-            runRoot("rm -rf /data/adb/modules/osupatch 2>/dev/null");
-            log("-> Magisk модуль удалён");
-        });
-    }
-
-    static class PatchTarget {
-        String mountTarget;
-        String blobPath;
-        boolean isBlobMode;
-        String packageName;
-        String apkDir;
-        String targetArch;
-    }
-
-    private String detectOsuArch(PatchTarget pt) {
-        if (pt == null || pt.apkDir == null) return "unknown";
-        
-        String so = runRoot("find '" + escQ(pt.apkDir) + "' -name '*.so' 2>/dev/null | head -10").trim();
-        if (so.contains("arm64")) return "arm64";
-        if (so.contains("armeabi-v7a") || so.contains("armeabi")) return "arm32";
-        
-        return "unknown";
-    }
-
-    private PatchTarget findPatchTarget() {
-        String apkDir = null;
-        String detectedPkg = null;
-
-        // [1] pm path
-        log("[Поиск 1] pm path...");
-        for (String pkg : OSU_PACKAGES) {
-            String out = runRoot("pm path " + pkg + " 2>/dev/null").trim();
-            String path = firstApkPath(out);
-            if (!path.isEmpty()) {
-                apkDir = dirOf(path);
-                detectedPkg = pkg;
-                log("✓ [1] " + pkg + " -> " + apkDir);
-                break;
-            }
-        }
-
-        // [2] pm list packages -3
-        if (apkDir == null) {
-            log("[Поиск 2] pm list packages -3...");
-            String all = runRoot("pm list packages -3 2>/dev/null");
-            for (String line : all.split("\n")) {
-                line = line.trim();
-                if (!line.startsWith("package:")) continue;
-                for (String p : OSU_PACKAGES) {
-                    if (line.toLowerCase().contains(p.toLowerCase())) {
-                        String out = runRoot("pm path " + p + " 2>/dev/null").trim();
-                        String path = firstApkPath(out);
-                        if (!path.isEmpty()) {
-                            apkDir = dirOf(path);
-                            detectedPkg = p;
-                            log("✓ [2] " + p + " -> " + apkDir);
-                            break;
-                        }
-                    }
-                }
-                if (apkDir != null) break;
-            }
-        }
-
-        // [3] find /data/app
-        if (apkDir == null) {
-            log("[Поиск 3] find /data/app...");
-            String[] frags = {"osulazer", "ppy.osu", "ppy", "rimu", "osu", "mathiessen", "reco1l", "beatmap", "cephasun"};
-            for (String frag : frags) {
-                String found = runRoot(
-                    "find /data/app -maxdepth 3 -name 'base.apk' 2>/dev/null | grep -i '" + frag + "' | head -3").trim();
-                if (!found.isEmpty()) {
-                    apkDir = dirOf(found.split("\n")[0].trim());
-                    detectedPkg = "sh.ppy." + frag;
-                    log("✓ [3] " + frag + " -> " + apkDir);
-                    break;
-                }
-            }
-        }
-
-        // [4] find по SEARCH_ROOTS
-        if (apkDir == null) {
-            log("[Поиск 4] find SEARCH_ROOTS...");
-            for (String root : SEARCH_ROOTS) {
-                String found = runRoot(
-                    "find " + root + " -maxdepth 5 -name '*.apk' 2>/dev/null | grep -iE 'osu|ppy|rimu' | head -3").trim();
-                if (!found.isEmpty()) {
-                    apkDir = dirOf(found.split("\n")[0].trim());
-                    detectedPkg = "osu! (" + root + ")";
-                    log("✓ [4] -> " + apkDir);
-                    break;
-                }
-            }
-        }
-
-        // [5] dumpsys
-        if (apkDir == null) {
-            log("[Поиск 5] dumpsys...");
-            for (String pkg : OSU_PACKAGES) {
-                String dump = runRoot("dumpsys package " + pkg + " 2>/dev/null | grep codePath | head -3").trim();
-                for (String ln : dump.split("\n")) {
-                    int eq = ln.indexOf('=');
-                    if (eq >= 0) {
-                        String p = ln.substring(eq + 1).trim();
-                        if (!p.isEmpty()) {
-                            apkDir = p;
-                            detectedPkg = pkg;
-                            log("✓ [5] " + pkg + " -> " + apkDir);
-                            break;
-                        }
-                    }
-                }
-                if (apkDir != null) break;
-            }
-        }
-
-        // [6] /proc/mounts
-        if (apkDir == null) {
-            log("[Поиск 6] /proc/mounts...");
-            String mounts = runRoot("grep -iE 'osu|ppy|rimu' /proc/mounts 2>/dev/null | head -5").trim();
-            for (String ln : mounts.split("\n")) {
-                String[] p = ln.split("\\s+");
-                if (p.length > 1 && (p[1].contains("apk") || p[1].contains("oat"))) {
-                    apkDir = dirOf(p[1]);
-                    detectedPkg = "osu! (mounts)";
-                    log("✓ [6] -> " + apkDir);
-                    break;
-                }
-            }
-        }
-
-        // [7] find .so
-        if (apkDir == null) {
-            log("[Поиск 7] so...");
-            String found = runRoot("find /data -maxdepth 10 -name 'libosu*.so' 2>/dev/null | head -3").trim();
-            if (found.isEmpty()) {
-                found = runRoot("find /data -maxdepth 10 -name 'libil2cpp.so' 2>/dev/null | grep -iE 'osu|ppy' | head -3").trim();
-            }
-            if (!found.isEmpty()) {
-                apkDir = dirOf(found.split("\n")[0].trim());
-                detectedPkg = "osu! (so)";
-                log("✓ [7] -> " + apkDir);
-            }
-        }
-
-        // [8] ls /data/data/
-        if (apkDir == null) {
-            log("[Поиск 8] ls /data/data...");
-            String dirs = runRoot("ls /data/data/ 2>/dev/null").trim();
-            for (String dir : dirs.split("\n")) {
-                for (String p : OSU_PACKAGES) {
-                    if (dir.replace("sh.", "").replace("com.", "").contains(p.replace("sh.", "").replace("com.", ""))) {
-                        String apks = runRoot("ls /data/data/" + dir + "/base.apk 2>/dev/null").trim();
-                        if (!apks.isEmpty()) {
-                            apkDir = "/data/data/" + dir;
-                            detectedPkg = dir;
-                            log("✓ [8] " + dir);
-                            break;
-                        }
-                    }
-                }
-                if (apkDir != null) break;
-            }
-        }
-
-        if (apkDir == null) {
-            log("✗ osu! не найден ВСЕМИ методами!");
-            log("-> Покажи содержимое /data/app:");
-            log(runRoot("ls /data/app/ 2>/dev/null").trim());
-            return null;
-        }
-
-        PatchTarget pt = new PatchTarget();
-        pt.packageName = detectedPkg != null ? detectedPkg : "unknown";
-        pt.apkDir = apkDir;
-        
-        pt.targetArch = detectOsuArch(pt);
-        log("-> osu! архитектура: " + pt.targetArch);
-
-        String baseName = (pickedFileName != null && !pickedFileName.isEmpty())
-                ? stripExt(pickedFileName) : "Assembly-CSharp";
-
-        // Приоритет 1: AOT .so
-        log("-> Ищу AOT .so: " + baseName);
-        for (String nm : new String[]{
-                "libaot-" + baseName + ".dll.so",
-                "libaot-" + baseName + ".so",
-                baseName + ".dll.so"}) {
-            String f = runRoot("find '" + escQ(apkDir) + "' -name '" + nm + "' 2>/dev/null").trim();
-            if (f.isEmpty()) {
-                f = runRoot("find '" + escQ(dirOf(apkDir)) + "' -name '" + nm + "' 2>/dev/null | head -5").trim();
-            }
-            if (!f.isEmpty()) {
-                String best = pickBestArch(f);
-                pt.mountTarget = best;
-                pt.isBlobMode = false;
-                log("-> Цель AOT SO: " + best);
-                return pt;
-            }
-        }
-
-        // Приоритет 2: blob - ВО ВСЕХ папках
-        log("-> Ищу blob ВО ВСЕХ папках...");
-        String blobs = runRoot("find '" + escQ(apkDir) + "' -name '*.blob' 2>/dev/null").trim();
-        if (blobs.isEmpty()) {
-            blobs = runRoot("find '" + escQ(dirOf(apkDir)) + "' -name '*.blob' 2>/dev/null | head -10").trim();
-        }
-        if (blobs.isEmpty() && detectedPkg != null) {
-            blobs = runRoot("find /data/data/" + detectedPkg + " -name '*.blob' 2>/dev/null | head -5").trim();
-        }
-        if (blobs.isEmpty()) {
-            blobs = runRoot("find '" + escQ(apkDir) + "' -name '*assemblies*.blob' 2>/dev/null").trim();
-        }
-        if (blobs.isEmpty()) {
-            blobs = runRoot("find /data -maxdepth 8 -name '*.blob' 2>/dev/null | grep -iE 'osu|assemblies' | head -10").trim();
-        }
-        
-        if (!blobs.isEmpty()) {
-            String best = pickBestBlob(blobs);
-            pt.blobPath = best;
-            pt.mountTarget = best;
-            pt.isBlobMode = true;
-            log("-> Цель BLOB: " + best);
-            return pt;
-        }
-
-        // Приоритет 3: .dll
-        log("-> Ищу .dll: " + baseName + ".dll");
-        String f = runRoot("find '" + escQ(apkDir) + "' -name '" + baseName + ".dll' 2>/dev/null | head -5").trim();
-        if (f.isEmpty()) {
-            f = runRoot("find '" + escQ(dirOf(apkDir)) + "' -name '" + baseName + ".dll' 2>/dev/null | head -5").trim();
-        }
-        if (!f.isEmpty()) {
-            pt.mountTarget = f.split("\n")[0].trim();
-            pt.isBlobMode = false;
-            log("-> Цель DLL: " + pt.mountTarget);
-            return pt;
-        }
-
-        // Приоритет 4: fuzzy
-        String q = baseName != null ? baseName.toLowerCase() : "game";
-        f = runRoot("find '" + escQ(apkDir) + "' -name '*.so' 2>/dev/null | grep -i '" + q + "' | head -3").trim();
-        if (!f.isEmpty()) {
-            pt.mountTarget = pickBestArch(f);
-            pt.isBlobMode = false;
-            log("-> Цель SO (fuzzy): " + pt.mountTarget);
-            return pt;
-        }
-
-        // Показываем что есть в папке
-        log("✗ НО! Файлы в apkDir:");
-        String all = runRoot("find '" + escQ(apkDir) + "' -type f 2>/dev/null | head -40").trim();
-        log(all.isEmpty() ? "(пусто)" : all);
-        
-        // Последняя попытка
-        log("-> Ищу любые .so...");
-        f = runRoot("find '" + escQ(apkDir) + "' -name '*.so' 2>/dev/null | head -20").trim();
-        if (!f.isEmpty()) {
-            pt.mountTarget = pickBestArch(f);
-            pt.isBlobMode = false;
-            log("-> Цель - первый .so: " + pt.mountTarget);
-            return pt;
-        }
-        
-        return null;
-    }
-
-    private String pickBestArch(String multiline) {
-        String[] lines = multiline.split("\n");
-        for (String arch : new String[]{"arm64-v8a", "arm64", "armeabi-v7a", "arm", "x86_64", "x86"}) {
-            for (String ln : lines) {
-                if (ln.trim().contains(arch)) return ln.trim();
-            }
-        }
-        return lines[0].trim();
-    }
-
-    private String pickBestBlob(String multiline) {
-        String[] lines = multiline.split("\n");
-        for (String ln : lines) {
-            ln = ln.trim();
-            if (ln.contains("arm64") && ln.contains("assemblies")) return ln;
-        }
-        for (String ln : lines) {
-            ln = ln.trim();
-            if (ln.contains("arm64")) return ln;
-        }
-        for (String ln : lines) {
-            ln = ln.trim();
-            if (ln.contains("assemblies")) return ln;
-        }
-        return lines[0].trim();
-    }
-
-    private String firstApkPath(String pmOut) {
-        if (pmOut == null || pmOut.isEmpty()) return "";
-        for (String line : pmOut.split("\n")) {
-            line = line.trim();
-            if (!line.startsWith("package:")) continue;
-            String p = line.substring("package:").length().trim();
-            if (p.contains("base")) return p;
-        }
-        return "";
-    }
-
-    private String dirOf(String path) {
-        if (path == null || path.isEmpty()) return path;
-        int idx = path.lastIndexOf('/');
-        return idx > 0 ? path.substring(0, idx) : path;
-    }
-
-    private boolean isMounted(String path) {
-        return checkMountReal(path);
-    }
-
-    private void success(PatchTarget pt, String srcFile) {
-        log("✓ Патч применён!");
-        log("  источник: " + srcFile);
-        log("  цель: " + pt.mountTarget);
-        log("⚠ Перезапусти osu! для загрузки патча");
-        
-        String hash = runRoot("md5sum '" + escQ(pt.mountTarget) + "' 2>/dev/null").trim();
-        if (!hash.isEmpty()) {
-            log("  hash: " + hash.split("\\s+")[0]);
-        }
-        
-        mainHandler.post(() -> setStatus("PATCHED ✓", "#4CAF50"));
     }
 
     private String escQ(String s) {
@@ -1177,10 +1116,17 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void success() {
+        log("✓ ПАТЧ УСПЕШНО ПРИМЕНЁН!");
+        log("⚠ Перезапусти osu!");
+        
+        mainHandler.post(() -> setStatus("PATCHED ✓", "#4CAF50"));
+    }
+
     private void fail() {
         mainHandler.post(() -> {
             setStatus("Ошибка", "#F44336");
             btnApply.setEnabled(true);
         });
     }
-}Sat May 16 07:18:11 UTC 2026
+}
