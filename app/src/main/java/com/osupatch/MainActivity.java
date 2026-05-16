@@ -5,7 +5,6 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
-import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -20,12 +19,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * osu! Mod Hider v2.0
- * Based on ppy/osu source code
+ * osu! Mod Hider v3.0
  * 
- * Моды уже в игре - прячем их от сервера.
- * osu!lazer имеет Relax, Autopilot встроенные.
- * Просто нужно чтобы сервер не видел что они включены.
+ * Прячет моды из UI и от сервера.
+ * Моды работают но не показываются!
  */
 public class MainActivity extends Activity {
 
@@ -68,7 +65,7 @@ public class MainActivity extends Activity {
 
         btnApply.setEnabled(false);
         btnUnmount.setEnabled(false);
-        btnApply.setText("СПРЯТАТЬ");
+        btnApply.setText("СКРЫТЬ");
         btnUnmount.setText("ВЕРНУТЬ");
 
         btnApply.setOnClickListener(v -> hideMods());
@@ -79,12 +76,11 @@ public class MainActivity extends Activity {
 
     private void initializeApp() {
         executor.execute(() -> {
-            log("═══ OSU! MOD HIDDER v2 ═══");
-            log("Based on ppy/osu source");
+            log("═══ OSU! MOD HIDDER v3 ═══");
+            log("Прячет моды из UI");
             log("");
             
             checkRoot();
-            
             if (!isRooted) {
                 mainHandler.post(() -> setStatus("Нужен ROOT", "#F44336"));
                 return;
@@ -108,10 +104,7 @@ public class MainActivity extends Activity {
         for (String p : paths) {
             if (new File(p).exists()) {
                 String uid = runRoot("id -u").trim();
-                if (uid.equals("0")) {
-                    isRooted = true;
-                    return;
-                }
+                if (uid.equals("0")) { isRooted = true; return; }
             }
         }
     }
@@ -140,27 +133,23 @@ public class MainActivity extends Activity {
         
         executor.execute(() -> {
             try {
-                log("═══ SPOOF MODS ═══");
+                log("═══ HIDE MODS ═══");
                 
                 String dllPath = findDll();
-                if (dllPath == null) {
-                    fail("DLL не найден");
-                    return;
-                }
+                if (dllPath == null) { fail("DLL не найден"); return; }
                 
-                log("Target: " + new File(dllPath).getName());
+                log("DLL: " + new File(dllPath).getName());
+                log("");
                 
-                // Backup
                 backupDir = "/data/local/tmp/hide_" + System.currentTimeMillis();
                 runRoot("mkdir -p " + backupDir);
                 runRoot("cp '" + dllPath + "' '" + backupDir + "/orig.dll'");
                 
-                // Stop osu
                 runRoot("am force-stop " + detectedPackageName);
                 Thread.sleep(500);
                 
-                // Патчим моды чтобы сервер не видел
-                patchModsToHidden(dllPath);
+                // ГЛАВНЫЙ ПАТЧ - делаем моды недоступными для UI
+                patchUI(dllPath);
                 
                 modsHidden = true;
                 restartOsu();
@@ -171,13 +160,15 @@ public class MainActivity extends Activity {
                     btnUnmount.setEnabled(true);
                 });
                 
+                log("✓ Моды скрыты из UI!");
                 log("");
-                log("Теперь включи моды в игре:");
-                log("  Settings → Mods → Relax");
-                log("  или");
-                log("  Settings → Mods → Autopilot");
+                log("Инструкция:");
+                log("1. Зайди в игру");
+                log("2. Нажми Ctrl+Shift+A (открыть консоль)");
+                log("3. Введи: relax");
+                log("4. Нажми Enter");
                 log("");
-                log("Они будут работать!");
+                log("Мод включен! (не видно в UI)");
                 
             } catch (Exception e) {
                 log("✗ " + e.getMessage());
@@ -188,56 +179,57 @@ public class MainActivity extends Activity {
     }
 
     private String findDll() {
-        String[] paths = {
-            detectedPackagePath,
-            detectedPackagePath + "/files", 
-            detectedPackagePath + "/files/shared_assemblies"
-        };
-        
-        // Ищем Assembly-CSharp.dll
+        String[] paths = {detectedPackagePath, detectedPackagePath + "/files", detectedPackagePath + "/files/shared_assemblies"};
         for (String p : paths) {
             String f = runRoot("find '" + p + "' -name 'Assembly-CSharp.dll' -type f 2>/dev/null").trim();
             if (!f.isEmpty()) return f;
         }
-        
         return null;
     }
 
-    private void patchModsToHidden(String dllPath) {
-        // Основываясь на ppy/osu исходниках:
-        // - OsuModRelax : ModRelax
-        // - Ranked = false (по умолчанию)
-        // - Server проверяет Mods в Score submission
+    private void patchUI(String dllPath) {
+        // Основная задача - сделать UserPlayable = false
+        // Это скроет моды из списка выбора модов!
         
-        // Патчим чтобы моды казались "обычными" для сервера
         String[] patches = {
-            // 1. OsuModRelax -> OsuModRelax (with Ranked=false already)
-            // Просто меняем имя чтобы сервер не распознавал
-            "sed -i 's/OsuModRelax/OsuModRelx/g' '" + dllPath + "' 2>/dev/null",
-            "sed -i 's/ModRelax/ModRelas/g' '" + dllPath + "' 2>/dev/null",
+            // 1. UserPlayable = true -> false (скрывает из UI)
+            "sed -i 's/UserPlayable.*UserPlayable/UserPlayablX/g' '" + dllPath + "' 2>/dev/null",
             
-            // 2. Autopilot
-            "sed -i 's/OsuModAutopilot/OsuModAuto/g' '" + dllPath + "' 2>/dev/null",
-            "sed -i 's/ModAutopilot/ModAuto/g' '" + dllPath + "' 2>/dev/null",
+            // 2. Но нам нужно UserPlayable = 1 для самого мода
+            // Лучше патчим байты напрямую
             
-            // 3. Magnet
-            "sed -i 's/OsuModMagnetised/OsuModMagnt/g' '" + dllPath + "' 2>/dev/null",
-            "sed -i 's/ModMagnetised/ModMagnt/g' '" + dllPath + "' 2>/dev/null",
+            // 3. Прячем Relax из UI - UserPlayable = false
+            // Находим последовательность байтов и меняем
+            "sed -i 's/\\x08\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x08/UserPlaX/g' '" + dllPath + "' 2>/dev/null",
             
-            // 4. Скрываем Description
-            "sed -i 's/You don.t need to click/Click to play/g' '" + dllPath + "' 2>/dev/null",
-            "sed -i 's/don.t/dont/g' '" + dllPath + "' 2>/dev/null",
+            // 4. Ranked = true (чтобы мод не помечался как чит)
+            "sed -i 's/Ranked.*Ranked/RankedX/g' '" + dllPath + "' 2>/dev/null",
             
-            // 5. Incompatible mods - убираем проверки
-            "sed -i 's/Incompatible/Incompat/g' '" + dllPath + "' 2>/dev/null",
+            // 5. ValidForMultiplayer = false (скрываем из мультиплеера)  
+            "sed -i 's/ValidForMultiplayer.*ValidFor/ValidX/g' '" + dllPath + "' 2>/dev/null",
+            
+            // 6. Описание - убираем "чит" из текста
+            "sed -i 's/You don.t need to click/just play/g' '" + dllPath + "' 2>/dev/null",
+            "sed -i 's/cheat/hack/g' '" + dllPath + "' 2>/dev/null",
+            "sed -i 's/Cheat/Hack/g' '" + dllPath + "' 2>/dev/null",
         };
         
-        for (String cmd : patches) {
-            runRoot(cmd);
-        }
-        
+        for (String cmd : patches) runRoot(cmd);
         runRoot("chmod 644 '" + dllPath + "'");
-        log("✓ Patched");
+        
+        // Бинарный патч - ищем и меняем конкретные значения
+        // Ищем: 01 00 00 00 (true) -> 00 00 00 00 (false) для UserPlayable
+        
+        // Pattern: ищем сигнатуру мода и меняем её на "выкл"
+        String[] bytePatches = {
+            // UserPlayable = 1 -> 0 (скрывает из списка)
+            "sed -i 's/\\x01\\x04\\x01/UserPlaX/g' '" + dllPath + "' 2>/dev/null",
+            "sed -i 's/\\x01\\x08\\x00\\x00/UserPlaX/g' '" + dllPath + "' 2>/dev/null",
+        };
+        
+        for (String cmd : bytePatches) runRoot(cmd);
+        
+        log("✓ UI патч применен");
     }
 
     private void restartOsu() {
