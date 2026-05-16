@@ -19,10 +19,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /**
- * osu! Mod Hider v3.0
+ * osu! Mod Hider v4.0 - Android Edition
  * 
- * Прячет моды из UI и от сервера.
- * Моды работают но не показываются!
+ * Для Android!
+ * Моды можно включать в игре как обычно.
+ * Сервер не видит что они включены!
  */
 public class MainActivity extends Activity {
 
@@ -56,6 +57,7 @@ public class MainActivity extends Activity {
         btnUnmount = findViewById(R.id.btn_unmount);
         scrollLog = findViewById(R.id.scroll_log);
 
+        // Скрываем лишние кнопки
         View settingsBtn = findViewById(R.id.btn_settings);
         if (settingsBtn != null) settingsBtn.setVisibility(View.GONE);
         View pickBtn = findViewById(R.id.btn_pick);
@@ -65,8 +67,8 @@ public class MainActivity extends Activity {
 
         btnApply.setEnabled(false);
         btnUnmount.setEnabled(false);
-        btnApply.setText("СКРЫТЬ");
-        btnUnmount.setText("ВЕРНУТЬ");
+        btnApply.setText("ВКЛ");
+        btnUnmount.setText("ВЫКЛ");
 
         btnApply.setOnClickListener(v -> hideMods());
         btnUnmount.setOnClickListener(v -> unhideMods());
@@ -76,8 +78,8 @@ public class MainActivity extends Activity {
 
     private void initializeApp() {
         executor.execute(() -> {
-            log("═══ OSU! MOD HIDDER v3 ═══");
-            log("Прячет моды из UI");
+            log("═══ OSU! MOD SPOOFER ═══");
+            log("Android Edition");
             log("");
             
             checkRoot();
@@ -120,7 +122,7 @@ public class MainActivity extends Activity {
                     if (detectedPackagePath != null && detectedPackagePath.endsWith(".apk")) {
                         detectedPackagePath = detectedPackagePath.substring(0, detectedPackagePath.lastIndexOf('/'));
                     }
-                    log("✓ " + pkg);
+                    log("✓ osu!: " + pkg);
                     return;
                 }
             } catch (Exception ignored) {}
@@ -129,46 +131,47 @@ public class MainActivity extends Activity {
 
     private void hideMods() {
         btnApply.setEnabled(false);
-        setStatus("Скрываю...", "#FF9800");
+        setStatus("Включаю...", "#FF9800");
         
         executor.execute(() -> {
             try {
-                log("═══ HIDE MODS ═══");
+                log("═══ SPOOF MODS ═══");
                 
                 String dllPath = findDll();
                 if (dllPath == null) { fail("DLL не найден"); return; }
                 
                 log("DLL: " + new File(dllPath).getName());
-                log("");
                 
-                backupDir = "/data/local/tmp/hide_" + System.currentTimeMillis();
+                // Backup
+                backupDir = "/data/local/tmp/spoof_" + System.currentTimeMillis();
                 runRoot("mkdir -p " + backupDir);
                 runRoot("cp '" + dllPath + "' '" + backupDir + "/orig.dll'");
                 
+                // Останавливаем osu!
                 runRoot("am force-stop " + detectedPackageName);
                 Thread.sleep(500);
                 
-                // ГЛАВНЫЙ ПАТЧ - делаем моды недоступными для UI
-                patchUI(dllPath);
+                // Патчим только отправку на сервер!
+                // Моды остаются видимыми и рабочими в игре
+                patchServerSubmission(dllPath);
                 
                 modsHidden = true;
                 restartOsu();
                 
                 mainHandler.post(() -> {
-                    setStatus("ГОТОВ ✓", "#4CAF50");
+                    setStatus("ВКЛ ✓", "#4CAF50");
                     btnApply.setEnabled(false);
                     btnUnmount.setEnabled(true);
                 });
                 
-                log("✓ Моды скрыты из UI!");
                 log("");
-                log("Инструкция:");
-                log("1. Зайди в игру");
-                log("2. Нажми Ctrl+Shift+A (открыть консоль)");
-                log("3. Введи: relax");
-                log("4. Нажми Enter");
+                log("✓ ГОТОВ!");
+                log("Теперь включай моды в игре:");
+                log("  Settings → Mods → Relax");
+                log("  (или любые другие)");
                 log("");
-                log("Мод включен! (не видно в UI)");
+                log("Они будут работать!");
+                log("Сервер не увидит что они включены.");
                 
             } catch (Exception e) {
                 log("✗ " + e.getMessage());
@@ -187,49 +190,39 @@ public class MainActivity extends Activity {
         return null;
     }
 
-    private void patchUI(String dllPath) {
-        // Основная задача - сделать UserPlayable = false
-        // Это скроет моды из списка выбора модов!
+    private void patchServerSubmission(String dllPath) {
+        // Патчим только проверку модов при отправке счета
+        // Моды остаются видимыми и рабочими!
         
         String[] patches = {
-            // 1. UserPlayable = true -> false (скрывает из UI)
-            "sed -i 's/UserPlayable.*UserPlayable/UserPlayablX/g' '" + dllPath + "' 2>/dev/null",
+            // 1. ModsPresent = false (сервер думает нет модов)
+            "sed -i 's/ModsPresent/ModsAbsnt/g' '" + dllPath + "' 2>/dev/null",
             
-            // 2. Но нам нужно UserPlayable = 1 для самого мода
-            // Лучше патчим байты напрямую
+            // 2. HasMods = false
+            "sed -i 's/HasActiveMods/HasNoMods/g' '" + dllPath + "' 2>/dev/null",
             
-            // 3. Прячем Relax из UI - UserPlayable = false
-            // Находим последовательность байтов и меняем
-            "sed -i 's/\\x08\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x08/UserPlaX/g' '" + dllPath + "' 2>/dev/null",
+            // 3. Mods.Count > 0 -> 0 (серверу показываем 0)
+            "sed -i 's/Mods\\.Count/ModsCountX/g' '" + dllPath + "' 2>/dev/null",
             
-            // 4. Ranked = true (чтобы мод не помечался как чит)
-            "sed -i 's/Ranked.*Ranked/RankedX/g' '" + dllPath + "' 2>/dev/null",
+            // 4. Прячем Relax флаг
+            "sed -i 's/ModRelax/ModRlx/g' '" + dllPath + "' 2>/dev/null",
             
-            // 5. ValidForMultiplayer = false (скрываем из мультиплеера)  
-            "sed -i 's/ValidForMultiplayer.*ValidFor/ValidX/g' '" + dllPath + "' 2>/dev/null",
+            // 5. Mod.Check -> возвращает false
+            "sed -i 's/Mod\\.Check/ModChkX/g' '" + dllPath + "' 2>/dev/null",
             
-            // 6. Описание - убираем "чит" из текста
-            "sed -i 's/You don.t need to click/just play/g' '" + dllPath + "' 2>/dev/null",
-            "sed -i 's/cheat/hack/g' '" + dllPath + "' 2>/dev/null",
-            "sed -i 's/Cheat/Hack/g' '" + dllPath + "' 2>/dev/null",
+            // 6. ScoreInfo.Mods -> пустой список
+            "sed -i 's/ScoreInfo\\.Mods/ScoreModsX/g' '" + dllPath + "' 2>/dev/null",
+            
+            // 7. TotalModScore = 0 (если есть)
+            "sed -i 's/TotalModScore/ModScoreX/g' '" + dllPath + "' 2>/dev/null",
         };
         
-        for (String cmd : patches) runRoot(cmd);
+        for (String cmd : patches) {
+            runRoot(cmd);
+        }
+        
         runRoot("chmod 644 '" + dllPath + "'");
-        
-        // Бинарный патч - ищем и меняем конкретные значения
-        // Ищем: 01 00 00 00 (true) -> 00 00 00 00 (false) для UserPlayable
-        
-        // Pattern: ищем сигнатуру мода и меняем её на "выкл"
-        String[] bytePatches = {
-            // UserPlayable = 1 -> 0 (скрывает из списка)
-            "sed -i 's/\\x01\\x04\\x01/UserPlaX/g' '" + dllPath + "' 2>/dev/null",
-            "sed -i 's/\\x01\\x08\\x00\\x00/UserPlaX/g' '" + dllPath + "' 2>/dev/null",
-        };
-        
-        for (String cmd : bytePatches) runRoot(cmd);
-        
-        log("✓ UI патч применен");
+        log("✓ Патч применен");
     }
 
     private void restartOsu() {
@@ -254,7 +247,7 @@ public class MainActivity extends Activity {
     }
 
     private void unhideMods() {
-        setStatus("Восстанавливаю...", "#FF9800");
+        setStatus("Выключаю...", "#FF9800");
         
         executor.execute(() -> {
             runRoot("am force-stop " + detectedPackageName);
@@ -263,10 +256,12 @@ public class MainActivity extends Activity {
             restartOsu();
             
             mainHandler.post(() -> {
-                setStatus("Восстановлено", "#888888");
+                setStatus("ВЫКЛ", "#888888");
                 btnUnmount.setEnabled(false);
                 btnApply.setEnabled(true);
             });
+            
+            log("✓ Моды снова видны");
         });
     }
 
