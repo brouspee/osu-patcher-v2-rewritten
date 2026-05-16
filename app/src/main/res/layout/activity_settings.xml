@@ -1,0 +1,209 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#0D0D14">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <!-- Header -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Настройки чита"
+            android:textSize="22sp"
+            android:textStyle="bold"
+            android:textColor="#FF66AA"
+            android:fontFamily="monospace"
+            android:paddingBottom="16dp"/>
+
+        <!-- AIM ASSIST -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="AIM ASSIST"
+            android:textSize="12sp"
+            android:textColor="#888899"
+            android:fontFamily="monospace"/>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingVertical="8dp">
+
+            <SeekBar
+                android:id="@+id/sb_aim_assist"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:max="100"
+                android:progress="85"
+                android:progressTint="#CC3377"
+                android:thumbTint="#FF66AA"/>
+
+            <TextView
+                android:id="@+id/tv_aim_value"
+                android:layout_width="50dp"
+                android:layout_height="wrap_content"
+                android:text="85%"
+                android:textColor="#FF66AA"
+                android:textSize="14sp"
+                android:gravity="end"/>
+        </LinearLayout>
+
+        <!-- AUTO TAP -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingVertical="12dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="AUTO TAP"
+                android:textSize="14sp"
+                android:textColor="#FFFFFF"/>
+
+            <Switch
+                android:id="@+id/sw_auto_tap"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:checked="false"/>
+        </LinearLayout>
+
+        <!-- AUTO TAP PERCENT -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="AUTO TAP PERCENT"
+            android:textSize="12sp"
+            android:textColor="#888899"
+            android:fontFamily="monospace"/>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingVertical="8dp">
+
+            <SeekBar
+                android:id="@+id/sb_auto_tap_percent"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:max="100"
+                android:progress="90"
+                android:progressTint="#4CAF50"
+                android:thumbTint="#4CAF50"/>
+
+            <TextView
+                android:id="@+id/tv_auto_tap_value"
+                android:layout_width="50dp"
+                android:layout_height="wrap_content"
+                android:text="90%"
+                android:textColor="#4CAF50"
+                android:textSize="14sp"
+                android:gravity="end"/>
+        </LinearLayout>
+
+        <!-- SLIDER ASSIST -->
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="SLIDER ASSIST"
+            android:textSize="12sp"
+            android:textColor="#888899"
+            android:fontFamily="monospace"
+            android:paddingTop="8dp"/>
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingVertical="8dp">
+
+            <SeekBar
+                android:id="@+id/sb_slider_assist"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:max="100"
+                android:progress="70"
+                android:progressTint="#2196F3"
+                android:thumbTint="#2196F3"/>
+
+            <TextView
+                android:id="@+id/tv_slider_value"
+                android:layout_width="50dp"
+                android:layout_height="wrap_content"
+                android:text="70%"
+                android:textColor="#2196F3"
+                android:textSize="14sp"
+                android:gravity="end"/>
+        </LinearLayout>
+
+        <!-- MISS CHANCE -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingVertical="12dp">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Miss Chance"
+                android:textSize="14sp"
+                android:textColor="#FFFFFF"/>
+
+            <Switch
+                android:id="@+id/sw_miss_chance"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:checked="true"/>
+        </LinearLayout>
+
+        <!-- View Divider -->
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#333344"
+            android:layout_marginVertical="16dp"/>
+
+        <!-- SAVE BUTTON -->
+        <Button
+            android:id="@+id/btn_save"
+            android:layout_width="match_parent"
+            android:layout_height="56dp"
+            android:text="СОХРАНИТЬ"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            android:backgroundTint="#CC3377"/>
+
+        <!-- RESET BUTTON -->
+        <Button
+            android:id="@+id/btn_reset"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:text="СБРОСИТЬ"
+            android:textSize="12sp"
+            android:textColor="#AA8899"
+            android:backgroundTint="#1E1E30"
+            android:layout_marginTop="8dp"/>
+
+    </LinearLayout>
+</ScrollView>

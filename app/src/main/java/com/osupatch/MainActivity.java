@@ -60,7 +60,7 @@ public class MainActivity extends Activity {
     private static final int BLOB_MAGIC_V2 = 0x32424158;
 
     private TextView   tvLog, tvStatus;
-    private Button     btnPick, btnApply, btnUnmount;
+    private Button     btnPick, btnApply, btnUnmount, btnSettings;
     private EditText   etTargetName;
     private ScrollView scrollLog;
 
@@ -98,6 +98,7 @@ public class MainActivity extends Activity {
         btnPick      = findViewById(R.id.btn_pick);
         btnApply     = findViewById(R.id.btn_apply);
         btnUnmount   = findViewById(R.id.btn_unmount);
+        btnSettings = findViewById(R.id.btn_settings);
         etTargetName = findViewById(R.id.et_target_name);
         scrollLog    = findViewById(R.id.scroll_log);
 
@@ -105,6 +106,7 @@ public class MainActivity extends Activity {
         btnPick.setOnClickListener(v -> pickFile());
         btnApply.setOnClickListener(v -> applyPatch());
         btnUnmount.setOnClickListener(v -> unmount());
+        btnSettings.setOnClickListener(v -> openSettings());
 
     // Check permissions first
     checkPermissions();
@@ -1572,5 +1574,14 @@ private void checkSystemCapabilities() {
             setStatus("Ошибка", "#F44336");
             btnApply.setEnabled(true);
         });
+    }
+
+    private void openSettings() {
+        log("Открываю настройки...");
+        try {
+            startActivity(new android.content.Intent(this, SettingsActivity.class));
+        } catch (Exception e) {
+            log("✗ Не удалось открыть: " + e.getMessage());
+        }
     }
 }
