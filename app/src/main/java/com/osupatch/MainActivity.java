@@ -266,6 +266,44 @@ private void checkSystemCapabilities() {
             if (!ptraceScope.isEmpty() && !ptraceScope.equals("0")) {
                 log("⚠ ptrace может быть заблокирован!");
             }
+
+            // 5. Check for Magisk
+            String magiskVer = runRoot("magisk --version 2>/dev/null").trim();
+            if (!magiskVer.isEmpty()) {
+                hasMagisk = true;
+                log("Magisk: " + magiskVer);
+                
+                String zygiskConf = runRoot("cat /data/adb/zygisk 2>/dev/null").trim();
+                if (!zygiskConf.isEmpty()) {
+                    hasZygisk = true;
+                    log("Zygisk: ENABLED");
+                }
+            }
+            
+            // 6. Check LSPosed
+            String lsposedPath = runRoot("ls -la /data/data/org.lsposed 2>/dev/null").trim();
+            if (!lsposedPath.isEmpty()) {
+                hasLSPosed = true;
+                log("LSPosed: FOUND");
+            }
+            
+            // 7. Check Riru
+            String riruModules = runRoot("ls /data/adb/modules/ 2>/dev/null | grep -i riru").trim();
+            if (!riruModules.isEmpty()) {
+                hasRiru = true;
+                log("Riru: FOUND");
+            }
+            
+            // 8. Check KernelSU
+            String kernelSU = runRoot("ls /sys/module/kernel_su 2>/dev/null").trim();
+            if (!kernelSU.isEmpty()) {
+                log("KernelSU: ACTIVE");
+            }
+            
+            // 9. Check /proc/pid/mem accessibility
+            int currentPid = android.os.Process.myPid();
+            String memAccess = runRoot("test -r /proc/" + currentPid + "/mem && echo readable || echo not readable").trim();
+            log("/proc/pid/mem: " + memAccess);
             
             // 5. Check gdb availability
             String gdbAvail = runRoot("gdb --version 2>/dev/null").trim();
