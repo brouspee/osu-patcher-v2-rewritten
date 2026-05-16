@@ -92,7 +92,7 @@ public class MainActivity extends Activity {
     }
 
     private void checkRoot() {
-        String[] paths = {"/system/bin/su", "/system/xbin/su", "/data/adb/magisk/magisk"};
+        String[] paths = {"/system/bin/su", "/system/xbin/su", "/sbin/su", "/system/sbin/su", "/vendor/bin/su"};
         for (String p : paths) {
             if (new File(p).exists()) {
                 try {
@@ -224,15 +224,34 @@ public class MainActivity extends Activity {
     }
 
     private String runRoot(String cmd) {
-        if (!isRooted) return "";
+        String[] paths = {"/system/bin/su", "/system/xbin/su", "/sbin/su", "/system/sbin/su", "/vendor/bin/su"};
+        String suPath = null;
+        for (String p : paths) {
+            if (new File(p).exists()) {
+                suPath = p;
+                break;
+            }
+        }
+        if (suPath == null) return "";
+        
         StringBuilder sb = new StringBuilder();
         try {
-            Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", cmd});
+            Process p = Runtime.getRuntime().exec(new String[]{suPath, "-c", cmd});
             try (BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()))) {
                 String line;
                 while ((line = br.readLine()) != null) sb.append(line).append("\n");
             }
             p.waitFor();
+            
+            // Check if we got root by running id -u
+            Process p2 = Runtime.getRuntime().exec(new String[]{suPath, "-c", "id -u"});
+            BufferedReader br2 = new BufferedReader(new InputStreamReader(p2.getInputStream()));
+            String uid = br2.readLine();
+            br2.close();
+            p2.waitFor();
+            if ("0".equals(uid)) {
+                isRooted = true;
+            }
         } catch (Exception ignored) {}
         return sb.toString().trim();
     }
