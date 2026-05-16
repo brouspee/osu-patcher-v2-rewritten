@@ -233,7 +233,7 @@ public class MainActivity extends Activity {
             SimpleDateFormat sdf = new SimpleDateFormat("HH:mm:ss", Locale.getDefault());
             String time = sdf.format(new Date());
             tvLog.append("[" + time + "] " + msg + "\n");
-            scrollLog.post(() -> scrollLog.fullScroll(View.FOCUS_DOWN);
+            scrollLog.post(() -> scrollLog.fullScroll(View.FOCUS_DOWN));
         });
     }
 
