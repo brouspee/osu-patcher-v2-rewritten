@@ -166,6 +166,8 @@ private void requestAllFiles() {
 @Override
 protected void onActivityResult(int req, int res, Intent data) {
     super.onActivityResult(req, res, data);
+    
+    // Handle ALL_FILES permission request
     if (req == REQUEST_ALL_FILES && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
         hasAllFilesPermission = android.os.Environment.isExternalStorageManager();
         if (hasAllFilesPermission) {
@@ -174,7 +176,56 @@ protected void onActivityResult(int req, int res, Intent data) {
         } else {
             fail();
         }
+        return;
     }
+    
+    // Handle file picker request
+    if (req != PICK_REQUEST || res != RESULT_OK || data == null) return;
+    Uri uri = data.getData();
+    if (uri == null) return;
+
+    executor.execute(() -> {
+        try {
+            String origName = resolveFileName(uri);
+            if (origName == null || origName.isEmpty()) origName = "picked_file";
+            pickedFileName = origName;
+
+            pickedFileArch = detectFileArch(origName);
+            log("→ Файл архитектура: " + pickedFileArch);
+
+            File dest = new File(getCacheDir(), origName);
+            try (InputStream  in  = getContentResolver().openInputStream(uri);
+                 OutputStream out = new FileOutputStream(dest)) {
+                if (in == null) throw new Exception("Cannot open stream");
+                byte[] buf = new byte[65536];
+                int n;
+                while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+            }
+
+            pickedFile = dest;
+            pickedFileArch = detectFileArch(origName);
+            log("✓ Загружен: " + origName + " (" + dest.length() / 1024 + " KB) [" + pickedFileArch + "]");
+
+            if (!pickedFileArch.equals("unknown") && !detectedArch.equals("unknown")) {
+                if (!pickedFileArch.equals(detectedArch)) {
+                    mainHandler.post(this::showArchWarning);
+                    return;
+                }
+            }
+
+            targetType = null;
+            findTargetFiles();
+
+            mainHandler.post(() -> {
+                setStatus("Готов", "#4CAF50");
+                btnApply.setEnabled(true);
+            });
+
+        } catch (Exception e) {
+            log("✗ Ошибка загрузки: " + e.getMessage());
+            fail();
+        }
+    });
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -510,61 +561,6 @@ private void checkSystemCapabilities() {
         i.setType("*/*");
         i.addCategory(Intent.CATEGORY_OPENABLE);
         startActivityForResult(Intent.createChooser(i, "Выбери файл (.dll / .so / .blob)"), PICK_REQUEST);
-    }
-
-    @Override
-    protected void onActivityResult(int req, int res, Intent data) {
-        super.onActivityResult(req, res, data);
-        if (req != PICK_REQUEST || res != RESULT_OK || data == null) return;
-        Uri uri = data.getData();
-        if (uri == null) return;
-
-        executor.execute(() -> {
-            try {
-                String origName = resolveFileName(uri);
-                if (origName == null || origName.isEmpty()) origName = "picked_file";
-                pickedFileName = origName;
-
-                pickedFileArch = detectFileArch(origName);
-                log("→ Файл архитектура: " + pickedFileArch);
-
-                File dest = new File(getCacheDir(), origName);
-                try (InputStream  in  = getContentResolver().openInputStream(uri);
-                     OutputStream out = new FileOutputStream(dest)) {
-                    if (in == null) throw new Exception("Cannot open stream");
-                    byte[] buf = new byte[65536];
-                    int n;
-                    while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
-                }
-
-                pickedFile = dest;
-                log("✓ Загружен: " + origName + " (" + dest.length() / 1024 + " KB) [" + pickedFileArch + "]");
-
-                // Check architecture match
-                if (!pickedFileArch.equals("unknown") && !detectedArch.equals("unknown")) {
-                    if (!pickedFileArch.equals(detectedArch)) {
-                        log("⚠ АРХИТЕКТУРА НЕ СОВПАДАЕТ!");
-                        log("   Файл: " + pickedFileArch + ", osu: " + detectedArch);
-                        mainHandler.post(() -> showArchWarning());
-                        return;
-                    }
-                }
-
-                // Check version/size compatibility
-                checkPatchCompatibility(dest);
-
-                String baseName = stripExt(pickedFileName);
-                mainHandler.post(() -> {
-                    if (etTargetName.getText().toString().trim().isEmpty())
-                        etTargetName.setText(baseName);
-                    btnApply.setEnabled(true);
-                    setStatus("Готов — нажми Apply", "#4CAF50");
-                });
-
-            } catch (Exception e) {
-                log("✗ Ошибка загрузки: " + e.getMessage());
-            }
-        });
     }
 
     private void showArchWarning() {
