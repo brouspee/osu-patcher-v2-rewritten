@@ -475,41 +475,68 @@ private void checkSystemCapabilities() {
         
         log("Ищу: " + baseName);
         
-        // 1. Ищем blob файлы (в assemblies или корне)
-        String blobs = runRoot("find '" + detectedPackagePath + "' -name '*.blob' 2>/dev/null").trim();
-        if (blobs.isEmpty() && detectedPackageName != null) {
-            blobs = runRoot("find /data/data/" + detectedPackageName.replace(".", "_") + " -name '*.blob' 2>/dev/null").trim();
-        }
-        if (blobs.isEmpty()) {
-            blobs = runRoot("find /data/app/" + detectedPackageName + " -name '*.blob' 2>/dev/null").trim();
+        // Build list of paths to search
+        java.util.ArrayList<String> searchPaths = new java.util.ArrayList<>();
+        
+        // Add detected package path
+        if (detectedPackagePath != null) {
+            searchPaths.add(detectedPackagePath);
+            // Also add /files subdirectory
+            searchPaths.add(detectedPackagePath + "/files");
+            searchPaths.add(detectedPackagePath + "/files/shared_assemblies");
+            searchPaths.add(detectedPackagePath + "/assemblies");
         }
         
-        if (!blobs.isEmpty()) {
-            targetType = "blob";
-            log("Найден blob: " + blobs.split("\n")[0]);
-            checkBlobIntegrity(new File(blobs.split("\n")[0]));
-            return;
+        // Add alternative paths for osu!lazer
+        if (detectedPackageName != null) {
+            // /data/data/sh.ppy.osulazer/
+            String dataDataPath = "/data/data/" + detectedPackageName.replace(".", "_");
+            searchPaths.add(dataDataPath);
+            searchPaths.add(dataDataPath + "/files");
+            searchPaths.add(dataDataPath + "/files/shared_assemblies");
+            searchPaths.add(dataDataPath + "/assemblies");
+            
+            // /data/app/<package>/
+            String appPath = "/data/app/" + detectedPackageName;
+            searchPaths.add(appPath);
+            searchPaths.add(appPath + "/base");
+            searchPaths.add(appPath + "/split_config");
         }
         
-        // 2. Ищем AOT .so файлы - сначала точно Assembly-CSharp
-        for (String nm : new String[]{
-                "libaot-Assembly-CSharp.dll.so",
-                "libaot-" + baseName + ".dll.so",
-                "libaot-" + baseName + ".so",
-                baseName + ".dll.so"}) {
-            String so = runRoot("find '" + detectedPackagePath + "' -name '" + nm + "' 2>/dev/null").trim();
-            if (!so.isEmpty()) {
-                targetType = "so";
-                originalFileHash = runRoot("md5sum '" + so + "' 2>/dev/null").trim().split("\\s+")[0];
-                log("Найден AOT: " + so);
-                log("Original hash: " + originalFileHash);
+        // Try common paths
+        searchPaths.add("/data/data/sh.ppy.osulazer");
+        searchPaths.add("/data/data/sh.ppy.osulazer/files");
+        searchPaths.add("/data/data/sh.ppy.osulazer/files/shared_assemblies");
+        
+        // 1. Search for .blob files
+        for (String path : searchPaths) {
+            String blobs = runRoot("find '" + path + "' -name '*.blob' -type f 2>/dev/null").trim();
+            if (!blobs.isEmpty()) {
+                targetType = "blob";
+                log("Найден blob: " + blobs.split("\n")[0]);
+                checkBlobIntegrity(new File(blobs.split("\n")[0]));
                 return;
             }
         }
         
-        // 3. Ищем .dll файлы
-        for (String dllName : new String[]{"Assembly-CSharp.dll", baseName + ".dll"}) {
-            String dll = runRoot("find '" + detectedPackagePath + "' -name '" + dllName + "' 2>/dev/null").trim();
+        // 2. Search for AOT .so files
+        String[] soPatterns = {"libaot-Assembly-CSharp.dll.so", "libaot-" + baseName + ".dll.so", "libaot-" + baseName + ".so"};
+        for (String path : searchPaths) {
+            for (String pattern : soPatterns) {
+                String so = runRoot("find '" + path + "' -name '" + pattern + "' -type f 2>/dev/null").trim();
+                if (!so.isEmpty()) {
+                    targetType = "so";
+                    originalFileHash = runRoot("md5sum '" + so + "' 2>/dev/null").trim().split("\\s+")[0];
+                    log("Найден AOT: " + so);
+                    log("Original hash: " + originalFileHash);
+                    return;
+                }
+            }
+        }
+        
+        // 3. Search for .dll files
+        for (String path : searchPaths) {
+            String dll = runRoot("find '" + path + "' -name '" + baseName + ".dll' -type f 2>/dev/null").trim();
             if (!dll.isEmpty()) {
                 targetType = "dll";
                 originalFileHash = runRoot("md5sum '" + dll + "' 2>/dev/null").trim().split("\\s+")[0];
@@ -519,23 +546,31 @@ private void checkSystemCapabilities() {
             }
         }
         
-        // 4. List all available assemblies
-        String allDlls = runRoot("find '" + detectedPackagePath + "' -name '*.dll' 2>/dev/null").trim();
-        if (!allDlls.isEmpty()) {
-            log("Доступные DLL:");
-            for (String dll : allDlls.split("\n")) {
-                log("  " + new java.io.File(dll).getName());
+        // 4. List ALL available dll/so files
+        for (String path : searchPaths) {
+            String allDlls = runRoot("find '" + path + "' \\( -name '*.dll' -o -name '*.so' \\) -type f 2>/dev/null | head -10").trim();
+            if (!allDlls.isEmpty()) {
+                log("Файлы в " + path + ":");
+                String[] files = allDlls.split("\n");
+                for (int i = 0; i < Math.min(5, files.length); i++) {
+                    log("  " + new java.io.File(files[i]).getName());
+                }
+                // Use first file if we found any
+                if (targetType == null) {
+                    String[] parts = allDlls.split("\n");
+                    if (parts.length > 0) {
+                        String first = parts[0];
+                        if (first.endsWith(".dll")) {
+                            targetType = "dll";
+                        } else {
+                            targetType = "so";
+                        }
+                        originalFileHash = runRoot("md5sum '" + first + "' 2>/dev/null").trim().split("\\s+")[0];
+                        log("Использую: " + first);
+                        return;
+                    }
+                }
             }
-        }
-        
-        // 5. Fuzzy search for any assembly
-        String fuzzy = runRoot("find '" + detectedPackagePath + "' -name '*.so' 2>/dev/null | grep -i 'assembly' | head -5").trim();
-        if (!fuzzy.isEmpty()) {
-            targetType = "so";
-            String firstSo = fuzzy.split("\n")[0];
-            originalFileHash = runRoot("md5sum '" + firstSo + "' 2>/dev/null").trim().split("\\s+")[0];
-            log("Найден (fuzzy): " + firstSo);
-            return;
         }
         
         log("✗ Файлы не найдены!");
